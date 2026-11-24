@@ -11,6 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use crate::json::{num, Fields};
 use crate::opentherm::Watch;
+use crate::logf;
 
 const DIR: &str = "/media/scratch/opentherm-registers";
 const EXE: &str = "/nestlabs/sbin/nlclient";
