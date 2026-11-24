@@ -64,6 +64,7 @@ pub struct Bridge {
     pub occupancy: Arc<Occupancy>,
     /// The screen brightness the unit shows (brightness.rs).
     pub brightness: Arc<crate::brightness::Watch>,
+    opentherm: Arc<crate::opentherm::Watch>,
     mqtt: OnceLock<mqtt::Client>,
     /// The unit's wakes since nestlocal started (wake.rs).
     wakes: AtomicU64,
@@ -103,6 +104,7 @@ impl Bridge {
             updates: OnceLock::new(),
             occupancy: Arc::new(Occupancy::default()),
             brightness: Arc::new(crate::brightness::Watch::default()),
+            opentherm: Arc::new(crate::opentherm::Watch::default()),
             mqtt: OnceLock::new(),
             wakes: AtomicU64::new(0),
             announced: Mutex::new(None),
@@ -230,6 +232,20 @@ impl Bridge {
         }
         tokio::spawn(self.clone().keep_time());
         tokio::spawn(connection.run(self.clone()));
+    }
+
+    /// Read the OpenTherm log without changing nlclient or its settings.
+    pub fn watch_opentherm(self: &Arc<Self>, settings: std::path::PathBuf) {
+        let bridge = Arc::downgrade(self);
+        let runtime = tokio::runtime::Handle::current();
+        crate::opentherm::watch(self.opentherm.clone(), crate::occupancy::EVENT_LOG.into(), settings, move || {
+            let bridge = bridge.clone();
+            runtime.spawn(async move {
+                if let Some(bridge) = bridge.upgrade() {
+                    bridge.publish_state();
+                }
+            });
+        });
     }
 
     /// Asks Home Assistant for the time (its time automation); the answer
@@ -430,6 +446,9 @@ impl Bridge {
         shown.insert("mqtt_reconnects".into(), reconnects.into());
         shown.insert("mqtt_last_disconnect".into(), last_end.map_or(Value::Null, Value::from));
         shown.insert("wakes".into(), self.wakes.load(Ordering::Relaxed).into());
+        if crate::opentherm::enabled(dev) {
+            shown.extend(self.opentherm.shown());
+        }
         shown
     }
 
@@ -906,6 +925,36 @@ impl Bridge {
                     "payload_install" => "install",
                 },
             );
+        }
+
+        if crate::opentherm::enabled(dev) {
+            // A missing or stale measurement is unavailable, not zero or OFF.
+            let available = |key: &str| fields! {
+                "availability_topic" => Value::Null,
+                "availability_mode" => "all",
+                "availability" => serde_json::json!([
+                    {"topic": format!("{}/availability", self.base)},
+                    {"topic": st.clone(), "value_template": format!("{{{{ 'online' if value_json.{key} is defined and value_json.{key} is not none else 'offline' }}}}")}
+                ]),
+            };
+            for (key, name, unit, class) in crate::opentherm::NUMBERS {
+                sensor(&mut add, key, name, unit, class, available(key));
+            }
+            for (key, name, class) in crate::opentherm::FLAGS {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => on_off(key), "device_class" => class});
+                add("binary_sensor", key, name, c);
+            }
+            for (key, name) in crate::opentherm::CODES {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "entity_category" => "diagnostic"});
+                add("sensor", key, name, c);
+            }
+            for (key, name) in crate::opentherm::TIMES {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "device_class" => "timestamp", "entity_category" => "diagnostic"});
+                add("sensor", key, name, c);
+            }
         }
 
         if rename {
@@ -1423,6 +1472,30 @@ pub mod tests {
             "Home Assistant shows it in its own unit"
         );
         assert_eq!(eco["step"], json!(1), "Home Assistant takes the step in its own unit");
+    }
+
+    #[test]
+    fn opentherm_discovery_is_gated_and_missing_readings_are_unavailable() {
+        let b = test_bridge();
+        let sh = obj(json!({"can_heat": true}));
+        let flow = "homeassistant/sensor/nestlocal_s/opentherm_flow_temperature/config";
+        let burner = "homeassistant/binary_sensor/nestlocal_s/opentherm_source_on/config";
+        let max = "homeassistant/sensor/nestlocal_s/opentherm_max_supply_temperature/config";
+        let dev = obj(json!({"heat_link_heat_type": "opentherm"}));
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let config: Value = serde_json::from_str(&configs[burner]).unwrap();
+        assert_eq!(config["availability_mode"], json!("all"));
+        assert!(config.get("availability_topic").is_none());
+        assert!(config["availability"][1]["value_template"].as_str().unwrap().contains("is not none"));
+        assert!(configs.contains_key(flow));
+        let config: Value = serde_json::from_str(&configs[max]).unwrap();
+        assert!(config.get("command_topic").is_none());
+        assert_eq!(b.shown(&dev, &sh)["opentherm_source_on"], Value::Null);
+        let dev = obj(json!({"heat_link_heat_type": "onoff"}));
+        b.announce(&dev, &sh);
+        assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(flow));
+        assert!(!b.shown(&dev, &sh).contains_key("opentherm_source_on"));
     }
 
     #[test]
