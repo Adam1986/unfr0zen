@@ -19,6 +19,8 @@ const SETPOINT: (f64, f64) = (4.5, 35.0);
 /// Assistant's number entities offer.
 pub const ECO_LOW: (f64, f64) = (4.5, 21.0);
 pub const ECO_HIGH: (f64, f64) = (24.0, 32.0);
+// Nest DHW adjustment range; not negotiated boiler limits.
+pub const DHW_TARGET: (f64, f64) = (40.0, 65.0);
 
 /// What a command does: change a bucket, or nothing more (the outdoor
 /// weather, which is no bucket).
@@ -214,6 +216,15 @@ impl Bridge {
             }
 
             "hot_water_schedule" => device(fields! {"hot_water_mode" => if on_off(arg)? { "schedule" } else { "off" }}),
+
+            "hot_water_temperature" => {
+                let supported = self.store.get(&format!("device.{}", self.serial))
+                    .is_some_and(|d| crate::opentherm::dhw_temperature_supported(&d.value));
+                if !supported { return Err("OpenTherm DHW temperature control not reported".into()); }
+                let t = float(arg).filter(|t| (DHW_TARGET.0..=DHW_TARGET.1).contains(t))
+                    .ok_or_else(|| "expected a DHW temperature, 40-65 °C".to_string())?;
+                device(fields! {"hot_water_temperature" => num(t.round())})
+            }
 
             "preset" => {
                 let mode = match arg {

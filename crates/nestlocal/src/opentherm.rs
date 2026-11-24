@@ -28,8 +28,8 @@ pub const NUMBERS: [(&str, &str, &str, &str); 7] = [
     ("opentherm_water_pressure", "CH water pressure", "bar", "pressure"),
 ];
 pub const FLAGS: [(&str, &str, &str); 4] = [
-    ("opentherm_ch_active", "OpenTherm central heating active", "heat"),
-    ("opentherm_dhw_active", "OpenTherm DHW active", "heat"),
+    ("opentherm_ch_active", "Central heating active", "running"),
+    ("opentherm_dhw_active", "DHW active", "running"),
     ("opentherm_source_on", "Boiler heat source active", "running"),
     ("opentherm_fault", "Boiler fault", "problem"),
 ];
@@ -44,6 +44,11 @@ pub const TIMES: [(&str, &str); 2] = [
 
 pub fn enabled(dev: &Fields) -> bool {
     dev.get("heat_link_heat_type").and_then(Value::as_str) == Some("opentherm")
+}
+
+pub fn dhw_temperature_supported(dev: &Fields) -> bool {
+    enabled(dev) && dev.get("has_hot_water_temperature").and_then(Value::as_bool) == Some(true)
+        && dev.get("boiler_type").and_then(Value::as_str) == Some("combi")
 }
 
 fn empty_state() -> Fields {
