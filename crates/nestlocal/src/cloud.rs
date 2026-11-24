@@ -15,6 +15,9 @@
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -184,6 +187,68 @@ fn int(v: Option<&Value>) -> i64 {
     v.and_then(Value::as_f64).map_or(0, |f| f as i64)
 }
 
+// Temporary, local-only diagnostic capture. An operator explicitly creates
+// this private directory to enable it, and removes/renames it to disable it.
+const HEATLINK_CAPTURE_DIR: &str = "/media/scratch/opentherm-capture";
+const MAX_HEATLINK_CAPTURE_BYTES: usize = 1024 * 1024;
+const MAX_HEATLINK_CAPTURES: usize = 8;
+
+/// Keep the original upload bytes (possibly compressed), never credentials,
+/// headers, or ordinary event logs. Do not alter the cloud acknowledgement
+/// on a capture error: this is a best-effort diagnostic feature.
+fn capture_heatlink_upload(dir: &Path, headers: &HeaderMap, body: &[u8]) -> io::Result<()> {
+    let meta = match std::fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "capture directory must be private"));
+    }
+    let kind = headers.get("x-nl-log-file-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !kind.eq_ignore_ascii_case("heatlinkevent") && !kind.eq_ignore_ascii_case("nlhlevent") {
+        // Only report the classification, not the request body or any auth
+        // headers. A different firmware type can be identified from this.
+        let safe_kind = if !kind.is_empty() && kind.len() <= 40 && kind.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+        }) { kind } else { "unknown" };
+        logf!("heatlink capture: ignored upload type={safe_kind}, bytes={}", body.len());
+        return Ok(());
+    }
+    if body.is_empty() || body.len() > MAX_HEATLINK_CAPTURE_BYTES {
+        logf!("heatlink capture: skipped empty or oversized upload ({} bytes)", body.len());
+        return Ok(());
+    }
+    let sequence = headers.get("x-nl-log-file-sequence-number")
+        .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    let name = match sequence {
+        Some(n) => format!("heatlink-{n}.bin"),
+        None => format!("heatlink-time-{}.bin", now_ms()),
+    };
+    let path = dir.join(&name);
+    if path.exists() {
+        return Ok(());
+    }
+    // Stop at a fixed cap; do not delete evidence automatically. All files in
+    // this dedicated directory count towards the cap, even if renamed.
+    if std::fs::read_dir(dir)?.take(MAX_HEATLINK_CAPTURES).count() >= MAX_HEATLINK_CAPTURES {
+        logf!("heatlink capture: full; retrieve captured files before collecting more");
+        return Ok(());
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if let Err(e) = file.write_all(body).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    logf!("heatlink capture: saved {name}, {} bytes", body.len());
+    Ok(())
+}
+
 impl Cloud {
     /// Serves nlclient over HTTPS on listen, for good; the error is why it
     /// stopped.
@@ -252,7 +317,14 @@ impl Cloud {
         match path {
             "/entry" => self.entry(),
             "/passphrase" => self.reply(&json!({"value": "LOCAL00", "expires": now_ms() + 3_600_000})),
-            "/upload" => self.reply(&json!({"status": "ok"})), // logs and diagnostics: dropped
+            "/upload" => {
+                if *method == Method::POST {
+                    if let Err(e) = capture_heatlink_upload(Path::new(HEATLINK_CAPTURE_DIR), headers, body) {
+                        logf!("heatlink capture: {e}");
+                    }
+                }
+                self.reply(&json!({"status": "ok"}))
+            }
             _ if path.starts_with("/transport/") => self.transport(path, body),
             _ if path.starts_with("/weather/") => self.weather(uri.query()),
             _ if path.starts_with("/pro_info/") => empty(StatusCode::NOT_FOUND),
@@ -463,6 +535,48 @@ mod tests {
         let (parts, body) = r.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes();
         (parts.status, parts.headers, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn heatlink_capture_filters_and_limits_uploads() {
+        let dir = std::env::temp_dir().join(format!("nestlocal-heatlink-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("heatlinkevent"));
+        headers.insert("x-nl-log-file-sequence-number", HeaderValue::from_static("38332"));
+        let body = b"\x1f\x8b\x00\xff";
+        capture_heatlink_upload(&dir, &headers, body).unwrap();
+        assert!(!dir.exists(), "disabled by default");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("clientevent"));
+        capture_heatlink_upload(&dir, &headers, body).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("heatlinkevent"));
+        capture_heatlink_upload(&dir, &headers, &vec![0; MAX_HEATLINK_CAPTURE_BYTES + 1]).unwrap();
+        capture_heatlink_upload(&dir, &headers, b"").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        capture_heatlink_upload(&dir, &headers, body).unwrap();
+        let path = dir.join("heatlink-38332.bin");
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        capture_heatlink_upload(&dir, &headers, b"duplicate").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        for seq in 0..MAX_HEATLINK_CAPTURES {
+            headers.insert("x-nl-log-file-sequence-number", HeaderValue::from_bytes(seq.to_string().as_bytes()).unwrap());
+            capture_heatlink_upload(&dir, &headers, body).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), MAX_HEATLINK_CAPTURES);
+        assert!(!dir.join(format!("heatlink-{}.bin", MAX_HEATLINK_CAPTURES - 1)).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn heatlink_capture_keeps_upload_acknowledgement() {
+        let c = cloud();
+        let (status, _, response) = call(&c, "/upload", "ordinary upload").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, r#"{"status":"ok"}"#);
     }
 
     #[tokio::test]
