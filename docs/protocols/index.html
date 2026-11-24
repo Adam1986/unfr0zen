@@ -216,6 +216,19 @@ mosquitto_pub -h broker.lan -t 'nestlocal/&lt;serial&gt;/set/target' -m 21.5</co
                 </table>
             </div>
 
+            <h3>OpenTherm telemetry (MQTT only)</h3>
+            <p>With an OpenTherm Heat Link, the retained <code>state</code> object also includes read-only boiler telemetry from nlclient's event log and settings. Diagnostic readings are buffered by nlclient. Each stream expires independently after five minutes; unavailable readings are <code>null</code>, not zero or false. The timestamps show when readings were measured or calculated, not when MQTT published them.</p>
+            <ul>
+                <li><code>opentherm_max_supply_temperature</code>: configured maximum CH supply temperature (°C), read-only.</li>
+                <li><code>opentherm_requested_flow_temperature</code>: calculated boiler setpoint (°C).</li>
+                <li><code>opentherm_flow_temperature</code>, <code>opentherm_return_temperature</code>, <code>opentherm_dhw_temperature</code>: reported water temperatures (°C).</li>
+                <li><code>opentherm_modulation</code>: relative modulation (%); <code>opentherm_water_pressure</code>: system pressure (bar).</li>
+                <li><code>opentherm_ch_active</code>, <code>opentherm_dhw_active</code>, <code>opentherm_source_on</code>, <code>opentherm_fault</code>: boiler status (boolean or null).</li>
+                <li><code>opentherm_oem_fault_code</code>, <code>opentherm_diagnostic_code</code>: integer codes, when reported.</li>
+                <li><code>opentherm_diagnostics_timestamp</code>, <code>opentherm_control_timestamp</code>: last event times (RFC 3339 UTC).</li>
+            </ul>
+            <p>Not all boilers provide every measurement. These entities do not change boiler settings or inhibit sleep.</p>
+
             <h2 id="mqtt-weather"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="M20 12h2"/><path d="m19.07 4.93-1.41 1.41"/><path d="M15.947 12.65a4 4 0 0 0-5.925-4.128"/><path d="M13 22H7a5 5 0 1 1 4.9-6H13a3 3 0 0 1 0 6Z"/></svg>Weather &amp; clock</h2>
             <p>The unit's weather screen and its clock came from Google. Over MQTT, anything can supply them; the Home Assistant blueprints on the <a href="/integrations/#mqtt">Integrations</a> page are one implementation.</p>
             <p><b>Weather.</b> Publish <code>set/outdoor_temperature</code> and <code>set/outdoor_humidity</code>; without both the unit shows no weather. Retain them so a restarted nestlocal gets them back, as the Home Assistant blueprint does. Optionally publish <code>set/weather</code>, retained too, as JSON in Home Assistant's own names:</p>
