@@ -70,7 +70,8 @@ jobs:
           rustc --version
           cargo --version
           zig version
-          cargo zigbuild --version
+          command -v cargo-zigbuild
+          "$HOME/zig-tools/bin/pip" show cargo-zigbuild
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
