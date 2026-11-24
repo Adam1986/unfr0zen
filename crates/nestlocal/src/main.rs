@@ -28,6 +28,7 @@ mod network;
 mod nlsettings;
 mod occupancy;
 mod opentherm;
+mod ot_registers;
 mod package;
 mod scratch;
 mod screen;

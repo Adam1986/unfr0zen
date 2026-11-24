@@ -974,6 +974,17 @@ impl Bridge {
                 c.extend(fields! {"value_template" => tmpl(key), "entity_category" => "diagnostic"});
                 add("sensor", key, name, c);
             }
+            // The register snapshot is slow and optional. Do not announce
+            // unacknowledged fields as working sensors or duplicate live telemetry.
+            let registers = self.opentherm.register_fields();
+            for &(key, name, unit, class) in crate::ot_registers::ENTITIES {
+                if !registers.contains_key(key) { continue; }
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "entity_category" => "diagnostic"});
+                if !unit.is_empty() { c.insert("unit_of_measurement".into(), unit.into()); }
+                if !class.is_empty() { c.insert("device_class".into(), class.into()); }
+                add("sensor", key, name, c);
+            }
             for (key, name) in crate::opentherm::TIMES {
                 let mut c = available(key);
                 c.extend(fields! {"value_template" => tmpl(key), "device_class" => "timestamp", "entity_category" => "diagnostic"});
@@ -1520,6 +1531,25 @@ pub mod tests {
         b.announce(&dev, &sh);
         assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(flow));
         assert!(!b.shown(&dev, &sh).contains_key("opentherm_source_on"));
+    }
+
+    #[test]
+    fn opentherm_register_discovery_is_optional_and_diagnostic() {
+        let b = test_bridge();
+        let dev = obj(json!({"heat_link_heat_type":"opentherm"}));
+        let sh = obj(json!({"can_heat":true}));
+        let target = "homeassistant/sensor/nestlocal_s/opentherm_boiler_dhw_setpoint/config";
+        let unsupported = "homeassistant/sensor/nestlocal_s/opentherm_dhw_flow_rate/config";
+        b.announce(&dev, &sh);
+        assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(target));
+        b.opentherm.update_registers(obj(json!({"opentherm_boiler_dhw_setpoint":52})));
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let config: Value = serde_json::from_str(&configs[target]).unwrap();
+        assert_eq!(config["name"], json!("Boiler DHW setpoint"));
+        assert_eq!(config["entity_category"], json!("diagnostic"));
+        assert!(!configs.contains_key(unsupported));
+        assert_eq!(b.shown(&dev,&sh)["opentherm_boiler_dhw_setpoint"],json!(52));
     }
 
     #[test]

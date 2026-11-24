@@ -19,12 +19,12 @@ const MAX_AGE: i64 = 5 * 60;
 const FUTURE_TOLERANCE: i64 = 30;
 
 pub const NUMBERS: [(&str, &str, &str, &str); 7] = [
-    ("opentherm_max_supply_temperature", "Maximum CH supply temperature", "°C", "temperature"),
+    ("opentherm_max_supply_temperature", "Nest CH temperature limit", "°C", "temperature"),
     ("opentherm_requested_flow_temperature", "Requested CH flow temperature", "°C", "temperature"),
-    ("opentherm_flow_temperature", "Actual CH flow temperature", "°C", "temperature"),
+    ("opentherm_flow_temperature", "Boiler flow temperature", "°C", "temperature"),
     ("opentherm_return_temperature", "CH return temperature", "°C", "temperature"),
-    ("opentherm_dhw_temperature", "Actual DHW temperature", "°C", "temperature"),
-    ("opentherm_modulation", "Relative boiler modulation", "%", ""),
+    ("opentherm_dhw_temperature", "DHW temperature", "°C", "temperature"),
+    ("opentherm_modulation", "Boiler modulation", "%", ""),
     ("opentherm_water_pressure", "CH water pressure", "bar", "pressure"),
 ];
 pub const FLAGS: [(&str, &str, &str); 4] = [
@@ -38,8 +38,8 @@ pub const CODES: [(&str, &str); 2] = [
     ("opentherm_diagnostic_code", "Boiler diagnostic code"),
 ];
 pub const TIMES: [(&str, &str); 2] = [
-    ("opentherm_diagnostics_timestamp", "OpenTherm diagnostics last measured"),
-    ("opentherm_control_timestamp", "OpenTherm control last calculated"),
+    ("opentherm_diagnostics_timestamp", "Boiler diagnostics last measured"),
+    ("opentherm_control_timestamp", "CH target last calculated"),
 ];
 
 pub fn enabled(dev: &Fields) -> bool {
@@ -62,13 +62,26 @@ fn empty_state() -> Fields {
 #[derive(Default)]
 pub struct Watch {
     shown: Mutex<Fields>,
+    registers: Mutex<Fields>,
 }
 
 impl Watch {
     pub fn shown(&self) -> Fields {
         let mut fields = empty_state();
         fields.extend(self.shown.lock().unwrap().clone());
+        fields.extend(self.register_fields());
         fields
+    }
+
+    pub(crate) fn register_fields(&self) -> Fields {
+        self.registers.lock().unwrap().clone()
+    }
+
+    pub(crate) fn update_registers(&self, next: Fields) -> bool {
+        let mut old = self.registers.lock().unwrap();
+        if *old == next { return false; }
+        *old = next;
+        true
     }
 
     fn update(&self, next: Fields) -> bool {
@@ -227,7 +240,10 @@ impl Reader {
 }
 
 /// Runs only for MQTT. No wake locks, boiler commands or settings writes.
-pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl Fn() + Send + 'static) {
+pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl Fn() + Send + Sync + 'static) {
+    let changed = Arc::new(changed);
+    let notify = changed.clone();
+    crate::ot_registers::watch(state.clone(), settings.clone(), move || notify());
     std::thread::spawn(move || {
         let mut reader: Option<Reader> = None;
         let mut samples = Samples::default();
