@@ -219,7 +219,7 @@ impl Bridge {
 
             "hot_water_temperature" => {
                 let supported = self.store.get(&format!("device.{}", self.serial))
-                    .is_some_and(|d| crate::opentherm::dhw_temperature_supported(&d.value));
+                    .is_some_and(|d| self.opentherm_enabled(&d.value) && crate::opentherm::dhw_temperature_supported(&d.value));
                 if !supported { return Err("OpenTherm DHW temperature control not reported".into()); }
                 let t = float(arg).filter(|t| (DHW_TARGET.0..=DHW_TARGET.1).contains(t))
                     .ok_or_else(|| "expected a DHW temperature, 40-65 °C".to_string())?;

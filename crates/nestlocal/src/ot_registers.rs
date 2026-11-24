@@ -208,11 +208,11 @@ pub fn watch(state: Arc<Watch>,settings: PathBuf,changed: impl Fn()+Send+'static
         let mut target = None;
         let mut sample = None;
         let mut enabled = false;
-        let mut checked = Instant::now() - Duration::from_secs(10);
+        let mut checked = Instant::now().checked_sub(Duration::from_secs(10));
         let mut retry = Instant::now();
         loop {
-            if checked.elapsed() >= Duration::from_secs(5) {
-                checked = Instant::now();
+            if checked.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
+                checked = Some(Instant::now());
                 let config = fs::read(&settings).unwrap_or_default();
                 let next = allowed(dir) && crate::nlsettings::value(&config,"heatlinkheat") == Some(b"opentherm".as_slice());
                 if next && !enabled { sample = load(dir); retry = Instant::now(); }

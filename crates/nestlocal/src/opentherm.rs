@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Seek};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,7 +16,7 @@ use crate::json::{num, Fields};
 const POLL: Duration = Duration::from_secs(5);
 // Diagnostics arrive about once a minute but can be buffered for several
 // minutes. This is a freshness policy, not a guarantee of update frequency.
-const MAX_AGE: i64 = 5 * 60;
+const MAX_AGE: i64 = 10 * 60;
 const FUTURE_TOLERANCE: i64 = 30;
 
 pub const NUMBERS: [(&str, &str, &str, &str); 7] = [
@@ -30,7 +31,7 @@ pub const NUMBERS: [(&str, &str, &str, &str); 7] = [
 pub const FLAGS: [(&str, &str, &str); 4] = [
     ("opentherm_ch_active", "Central heating active", "running"),
     ("opentherm_dhw_active", "DHW active", "running"),
-    ("opentherm_source_on", "Boiler heat source active", "running"),
+    ("opentherm_source_on", "Burner active", "running"),
     ("opentherm_fault", "Boiler fault", "problem"),
 ];
 pub const CODES: [(&str, &str); 2] = [
@@ -41,6 +42,35 @@ pub const TIMES: [(&str, &str); 2] = [
     ("opentherm_diagnostics_timestamp", "Boiler diagnostics last measured"),
     ("opentherm_control_timestamp", "CH target last calculated"),
 ];
+
+// Only the Gen 3 platform and its event schema have been validated.
+pub fn supported_platform(name: &str) -> bool { name == "diamond3" }
+
+pub const GRAPH_NUMBERS: [(&str, &str); 4] = [
+    ("opentherm_ch_flow_temperature", "CH flow temperature"),
+    ("opentherm_dhw_primary_flow_temperature", "DHW primary flow temperature"),
+    ("opentherm_idle_flow_temperature", "Idle flow temperature"),
+    ("opentherm_combined_flow_temperature", "Combined CH and DHW flow temperature"),
+];
+
+fn graph_index(values: &Fields) -> Option<usize> {
+    match (values.get("opentherm_ch_active").and_then(Value::as_bool),
+           values.get("opentherm_dhw_active").and_then(Value::as_bool)) {
+        (Some(true), Some(false)) => Some(0),
+        (Some(false), Some(true)) => Some(1),
+        (Some(false), Some(false)) => Some(2),
+        (Some(true), Some(true)) => Some(3),
+        _ => None,
+    }
+}
+
+fn graph_values(values: &mut Fields) {
+    let selected = graph_index(values);
+    let flow = values.get("opentherm_flow_temperature").cloned().unwrap_or(Value::Null);
+    for (i, (key, _)) in GRAPH_NUMBERS.iter().enumerate() {
+        values.insert((*key).into(), if selected == Some(i) { flow.clone() } else { Value::Null });
+    }
+}
 
 pub fn enabled(dev: &Fields) -> bool {
     dev.get("heat_link_heat_type").and_then(Value::as_str) == Some("opentherm")
@@ -53,6 +83,7 @@ pub fn dhw_temperature_supported(dev: &Fields) -> bool {
 
 fn empty_state() -> Fields {
     NUMBERS.iter().map(|(k, ..)| *k)
+        .chain(GRAPH_NUMBERS.iter().map(|(k, ..)| *k))
         .chain(FLAGS.iter().map(|(k, ..)| *k))
         .chain(CODES.iter().map(|(k, ..)| *k))
         .chain(TIMES.iter().map(|(k, ..)| *k))
@@ -63,6 +94,8 @@ fn empty_state() -> Fields {
 pub struct Watch {
     shown: Mutex<Fields>,
     registers: Mutex<Fields>,
+    combined_seen: AtomicBool,
+    dhw_seen: AtomicBool,
 }
 
 impl Watch {
@@ -72,6 +105,9 @@ impl Watch {
         fields.extend(self.register_fields());
         fields
     }
+
+    pub(crate) fn combined_seen(&self) -> bool { self.combined_seen.load(Ordering::Relaxed) }
+    pub(crate) fn dhw_seen(&self) -> bool { self.dhw_seen.load(Ordering::Relaxed) }
 
     pub(crate) fn register_fields(&self) -> Fields {
         self.registers.lock().unwrap().clone()
@@ -104,6 +140,8 @@ struct Sample {
 struct Samples {
     diagnostics: Option<Sample>,
     control: Option<Sample>,
+    combined_seen: bool,
+    dhw_seen: bool,
 }
 
 fn decimal(s: &str) -> Value {
@@ -154,6 +192,7 @@ fn parse(line: &str) -> Option<(bool, Sample)> {
             }
             values.insert("opentherm_oem_fault_code".into(), code(f[14]));
             values.insert("opentherm_diagnostic_code".into(), code(f[21]));
+            graph_values(&mut values);
             Some((true, Sample { timestamp: t, values }))
         }
         "RethinkStateResults" => {
@@ -175,6 +214,10 @@ impl Samples {
         // clock adjustment. Accept equal timestamps (control recalculations
         // can occur in the same second), in file order.
         if sample.timestamp > now.saturating_add(FUTURE_TOLERANCE) { return; }
+        if diag {
+            self.combined_seen |= graph_index(&sample.values) == Some(3);
+            self.dhw_seen |= sample.values.get("opentherm_dhw_active").and_then(Value::as_bool) == Some(true);
+        }
         let slot = if diag { &mut self.diagnostics } else { &mut self.control };
         if slot.as_ref().is_none_or(|old| sample.timestamp >= old.timestamp || old.timestamp > now.saturating_add(FUTURE_TOLERANCE)) {
             *slot = Some(sample);
@@ -264,11 +307,16 @@ pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl 
                         if new.read(&mut samples, now).is_err() { reader = None; }
                     }
                 }
-                if state.update(samples.shown(now, maximum(&config))) { changed(); }
+                let combined_new = samples.combined_seen && !state.combined_seen.swap(true, Ordering::Relaxed);
+                let dhw_new = samples.dhw_seen && !state.dhw_seen.swap(true, Ordering::Relaxed);
+                let updated = state.update(samples.shown(now, maximum(&config)));
+                if updated || combined_new || dhw_new { changed(); }
             } else {
                 reader = None;
                 samples = Samples::default();
-                if state.update(empty_state()) { changed(); }
+                let combined = state.combined_seen.swap(false, Ordering::Relaxed);
+                let dhw = state.dhw_seen.swap(false, Ordering::Relaxed);
+                if state.update(empty_state()) || combined || dhw { changed(); }
             }
             std::thread::sleep(POLL);
         }
@@ -285,6 +333,39 @@ mod tests {
     const IDLE: &str = "2026-01-01T00:00:00 RemoteModulatingBoilerDiag 1767225600 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.000000 - 65.399994 45.600006 - - - 0";
     const CONTROL: &str = "2026-01-01T00:00:00 RethinkStateResults 21.000 20.720 21.280 21.000 1000.000 -1.000 55.000 0.000 false false false 0 0 true true 0 21 \"CARBON\" 21.110";
     const T: i64 = 1767225600;
+
+    #[test]
+    fn opentherm_graph_categories_preserve_original_and_unknowns() {
+        for (ch, dhw, expected) in [(Some(true), Some(false), Some(0)),
+            (Some(false), Some(true), Some(1)), (Some(false), Some(false), Some(2)),
+            (Some(true), Some(true), Some(3)), (None, Some(false), None),
+            (Some(true), None, None), (None, Some(true), None), (None, None, None)] {
+            let mut v = Fields::new();
+            v.insert("opentherm_ch_active".into(), json!(ch));
+            v.insert("opentherm_dhw_active".into(), json!(dhw));
+            v.insert("opentherm_flow_temperature".into(), json!(54.5));
+            graph_values(&mut v);
+            assert_eq!(v["opentherm_flow_temperature"], json!(54.5));
+            for (i, (key, _)) in GRAPH_NUMBERS.iter().enumerate() {
+                assert_eq!(v[*key], if expected == Some(i) { json!(54.5) } else { Value::Null });
+            }
+            v.insert("opentherm_flow_temperature".into(), Value::Null);
+            graph_values(&mut v);
+            for (key, _) in GRAPH_NUMBERS { assert_eq!(v[key], Value::Null); }
+        }
+        let (_, s) = parse(DIAG).unwrap();
+        assert_eq!(s.values[GRAPH_NUMBERS[0].0], json!(50.5));
+        let (_, s) = parse(IDLE).unwrap();
+        assert_eq!(s.values[GRAPH_NUMBERS[2].0], json!(65.4));
+    }
+
+    #[test]
+    fn opentherm_supported_platforms() {
+        assert!(supported_platform("diamond3"));
+        for name in ["diamond", "j49", "unknown", "thermostat-e"] {
+            assert!(!supported_platform(name));
+        }
+    }
 
     #[test]
     fn active_diagnostics_decode_and_nulls_stay_null() {
@@ -325,6 +406,7 @@ mod tests {
         let stale = samples.shown(T + MAX_AGE + 1, json!(55));
         assert_eq!(stale["opentherm_modulation"], Value::Null);
         assert_eq!(stale["opentherm_source_on"], Value::Null);
+        assert_eq!(stale[GRAPH_NUMBERS[0].0], Value::Null);
         assert_eq!(stale["opentherm_requested_flow_temperature"], Value::Null);
         assert_eq!(stale["opentherm_max_supply_temperature"], json!(55));
         assert_eq!(stale["opentherm_diagnostics_timestamp"], json!("2026-01-01T00:00:00Z"));
