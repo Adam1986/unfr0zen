@@ -87,6 +87,9 @@ jobs:
       - name: Test OpenTherm parser and discovery
         run: cargo test --locked -p nestlocal --bin nestlocal opentherm
 
+      - name: Test Heat Link diagnostic capture
+        run: cargo test --locked -p nestlocal --bin nestlocal heatlink_capture
+
       - name: Build Nestlocal
         run: |
           cargo zigbuild \
