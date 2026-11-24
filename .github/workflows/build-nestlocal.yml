@@ -52,7 +52,18 @@ jobs:
           "$HOME/zig-tools/bin/pip" install \
             ziglang==0.16.0 \
             cargo-zigbuild==0.23.4
+
+          cat > "$HOME/zig-tools/bin/zig" <<'EOF'
+          #!/bin/sh
+          exec "$HOME/zig-tools/bin/python" -m ziglang "$@"
+          EOF
+
+          chmod +x "$HOME/zig-tools/bin/zig"
+
           echo "$HOME/zig-tools/bin" >> "$GITHUB_PATH"
+          echo "CARGO_ZIGBUILD_PYTHON_PATH=$HOME/zig-tools/bin/python" >> "$GITHUB_ENV"
+
+          "$HOME/zig-tools/bin/zig" version
 
       - name: Display toolchain versions
         run: |
