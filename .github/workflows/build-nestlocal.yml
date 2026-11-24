@@ -1,0 +1,109 @@
+name: Build Nestlocal ARMv7
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/opentherm-support
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Nestlocal for ARMv7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS: >-
+        -C link-arg=-Wl,-z,lazy
+        -C relocation-model=static
+        -C link-arg=-no-pie
+        -C target-cpu=cortex-a8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            clang \
+            binutils-arm-linux-gnueabihf \
+            python3-pip \
+            python3-venv
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add armv7-unknown-linux-gnueabihf
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          python3 -m venv "$HOME/zig-tools"
+          "$HOME/zig-tools/bin/pip" install \
+            ziglang==0.16.0 \
+            cargo-zigbuild==0.23.4
+          echo "$HOME/zig-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Display toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+          zig version
+          cargo zigbuild --version
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nestlocal-armv7-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            nestlocal-armv7-
+
+      - name: Build Nestlocal
+        run: |
+          cargo zigbuild \
+            --locked \
+            -p nestlocal \
+            --bin nestlocal \
+            --profile thermostat \
+            --target armv7-unknown-linux-gnueabihf.2.19
+
+      - name: Prepare build artifact
+        run: |
+          mkdir -p build
+
+          cp \
+            target/armv7-unknown-linux-gnueabihf/thermostat/nestlocal \
+            build/nestlocal-armv7
+
+          file build/nestlocal-armv7
+          ls -lh build/nestlocal-armv7
+
+          arm-linux-gnueabihf-readelf \
+            -h build/nestlocal-armv7
+
+          sha256sum build/nestlocal-armv7 \
+            > build/nestlocal-armv7.sha256
+
+      - name: Upload Nestlocal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nestlocal-armv7
+          path: |
+            build/nestlocal-armv7
+            build/nestlocal-armv7.sha256
+          if-no-files-found: error
+          retention-days: 14
