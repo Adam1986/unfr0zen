@@ -84,6 +84,9 @@ jobs:
           restore-keys: |
             nestlocal-armv7-
 
+      - name: Test OpenTherm parser and discovery
+        run: cargo test --locked -p nestlocal --bin nestlocal opentherm
+
       - name: Build Nestlocal
         run: |
           cargo zigbuild \
