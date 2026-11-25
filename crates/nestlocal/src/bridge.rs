@@ -651,11 +651,9 @@ impl Bridge {
                 "name" => if name.is_empty() { Value::Null } else { name.into() }, // null: the device's own name
                 "unique_id" => format!("{id}_{key}"),
                 "default_entity_id" => format!("{component}.{root}_{key}"),
-                // The Nest CH limit belongs with the thermostat settings (read-only
-                // for now). All boiler telemetry belongs on its linked device.
+                // All OpenTherm-specific settings and telemetry share the linked device.
                 "device" => Value::Object(if key.starts_with("opentherm_")
-                    && key != "opentherm_max_supply_temperature"
-                    && matches!(component, "sensor" | "binary_sensor") {
+                    || (key == "hot_water_temperature" && component == "number") {
                     boiler_device.clone()
                 } else { device.clone() }),
                 "availability_topic" => format!("{}/availability", self.base),
@@ -1800,7 +1798,8 @@ pub mod tests {
         assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config"));
         let config: Value = serde_json::from_str(&configs[max]).unwrap();
         assert!(config.get("command_topic").is_none());
-        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s"]));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
+        assert_eq!(config["name"], json!("Pro Setup Maximum Supply Temperature"));
         assert_eq!(b.shown(&dev, &sh)["opentherm_source_on"], Value::Null);
         let dev = obj(json!({"heat_link_heat_type": "onoff"}));
         b.announce(&dev, &sh);
@@ -1839,7 +1838,7 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let config: Value = serde_json::from_str(&configs[topic]).unwrap();
         assert_eq!(config["command_topic"], json!("nestlocal/S/set/hot_water_temperature"));
-        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s"]));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
         assert_eq!(config["unique_id"], json!("nestlocal_s_hot_water_temperature"));
         assert_eq!(config["min"].as_f64(), Some(40.0));
         assert_eq!(config["max"].as_f64(), Some(65.0));

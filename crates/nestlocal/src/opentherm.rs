@@ -20,10 +20,10 @@ const MAX_AGE: i64 = 10 * 60;
 const FUTURE_TOLERANCE: i64 = 30;
 
 pub const NUMBERS: [(&str, &str, &str, &str); 7] = [
-    ("opentherm_max_supply_temperature", "Nest CH Temperature Limit", "°C", "temperature"),
-    ("opentherm_requested_flow_temperature", "Requested CH Flow Temperature", "°C", "temperature"),
+    ("opentherm_max_supply_temperature", "Pro Setup Maximum Supply Temperature", "°C", "temperature"),
+    ("opentherm_requested_flow_temperature", "Requested Supply Temperature", "°C", "temperature"),
     ("opentherm_flow_temperature", "Boiler Flow Temperature", "°C", "temperature"),
-    ("opentherm_return_temperature", "CH Return Temperature", "°C", "temperature"),
+    ("opentherm_return_temperature", "Boiler Return Temperature", "°C", "temperature"),
     ("opentherm_dhw_temperature", "DHW Temperature", "°C", "temperature"),
     ("opentherm_modulation", "Boiler Modulation", "%", ""),
     ("opentherm_water_pressure", "CH Water Pressure", "bar", "pressure"),

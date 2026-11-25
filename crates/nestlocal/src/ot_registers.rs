@@ -30,7 +30,7 @@ const TIME: &str = "opentherm_register_timestamp";
 // No duplicates of the faster event-based temperature/status measurements.
 pub const ENTITIES: &[(&str, &str, &str, &str)] = &[
     ("opentherm_boiler_dhw_setpoint", "Boiler DHW Setpoint", "°C", "temperature"),
-    ("opentherm_boiler_ch_limit", "Boiler CH Temperature Limit", "°C", "temperature"),
+    ("opentherm_boiler_ch_limit", "Boiler Maximum CH Temperature", "°C", "temperature"),
     ("opentherm_dhw_min", "Boiler DHW Minimum Setpoint", "°C", "temperature"),
     ("opentherm_dhw_max", "Boiler DHW Maximum Setpoint", "°C", "temperature"),
     ("opentherm_ch_min", "Boiler CH Minimum Limit", "°C", "temperature"),
