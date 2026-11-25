@@ -314,7 +314,8 @@ impl Bridge {
                 // otherwise the generic bucket merge would bypass the gate.
                 Ok(Some(f)) if f.contains_key("boiler_supply_temperature")
                     || f.contains_key("has_boiler_supply_temperature")
-                    || f.contains_key("opentherm_max_supply_temperature") =>
+                    || f.contains_key("opentherm_max_supply_temperature")
+                    || f.contains_key(crate::opentherm_supply::CONTROL) =>
                 {
                     Err("OpenTherm supply temperature writes are not enabled".into())
                 }
@@ -415,7 +416,7 @@ impl Bridge {
                 device(fields! {"max_nighttime_preconditioning_seconds" => (hours as u64 * 3600)})
             }
 
-            "boiler_supply_temperature" | "opentherm_max_supply_temperature" => {
+            "boiler_supply_temperature" | "opentherm_max_supply_temperature" | crate::opentherm_supply::CONTROL => {
                 Err("OpenTherm supply temperature writes are not enabled".into())
             }
 
@@ -961,6 +962,8 @@ mod tests {
         for (name, arg) in [
             ("boiler_supply_temperature", "55"),
             ("opentherm_max_supply_temperature", "55"),
+            (crate::opentherm_supply::CONTROL, "55"),
+            ("raw/device", r#"{"opentherm_max_supply_temperature_control":55}"#),
             ("raw/device", r#"{"boiler_supply_temperature":55}"#),
             ("raw/device", r#"{"has_boiler_supply_temperature":false}"#),
             ("raw/device", r#"{"opentherm_max_supply_temperature":55}"#),
