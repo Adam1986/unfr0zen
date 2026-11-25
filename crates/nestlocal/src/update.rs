@@ -39,6 +39,9 @@ fn engine() -> &'static str {
 }
 /// "unfr0zen VERSION", written by the setup.
 const VERSION_FILE: &str = "/etc/unfr0zen/version";
+// This development binary is installed separately from the official OTA bundle.
+// Keep upstream release checks, but do not let an OTA replace this build.
+const DEVELOPMENT_BUILD: &str = "OpenTherm V6";
 /// The latest release, as GitHub's API describes it.
 pub const RELEASES: &str = "https://api.github.com/repos/unfr0zen/unfr0zen/releases/latest";
 /// Where a downloaded bundle waits for the engine, written as it arrives: on
@@ -217,7 +220,7 @@ impl Updates {
         Arc::new(Updates {
             device,
             installed: std::fs::read_to_string(VERSION_FILE).ok().as_deref().and_then(installed),
-            can_install: Path::new(engine()).is_file(),
+            can_install: false, // development binary: update by explicit manual deployment
             releases: releases.to_string(),
             store: store.to_path_buf(),
             latest: Mutex::new(load(store)),
@@ -256,10 +259,15 @@ impl Updates {
     /// The update entity's state.
     pub fn state(&self) -> Value {
         let latest = self.latest.lock().unwrap().clone();
+        let display = |version: &str| format!("{version} ({DEVELOPMENT_BUILD})");
+        let installed_display = self.installed.as_deref().map(display);
+        let latest_display = latest.as_ref().map(|r| {
+            let version = latest_version(self.installed.as_deref(), &r.version);
+            if self.installed.as_deref() == Some(version.as_str()) { display(&version) } else { version }
+        });
         json!({
-            "installed_version": self.installed,
-            // Unknown until a check answers.
-            "latest_version": latest.as_ref().map(|r| latest_version(self.installed.as_deref(), &r.version)),
+            "installed_version": installed_display,
+            "latest_version": latest_display,
             "release_url": latest.and_then(|r| r.url),
             "in_progress": self.installing.load(Ordering::Relaxed),
         })
@@ -310,7 +318,7 @@ impl Updates {
     /// unit's engine checks its bundle either way.
     pub fn install(self: &Arc<Self>, request: Request) {
         if !self.can_install {
-            return logf!("update: this unit has no update engine ({}): set it up with unfr0zen", engine());
+            return logf!("update: installation disabled for {DEVELOPMENT_BUILD}; deploy the development binary manually");
         }
         let (bundle, what, version) = match request {
             Request::Url(url) => (url.clone(), format!("the package at {url}"), None),
@@ -363,6 +371,7 @@ impl Updates {
     /// Claims the engine for one install, reported as in progress: false
     /// while another holds it.
     pub fn claim(&self) -> bool {
+        if !self.can_install { return false; }
         if self.installing.swap(true, Ordering::Relaxed) {
             return false;
         }

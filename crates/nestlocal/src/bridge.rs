@@ -74,6 +74,8 @@ pub struct Bridge {
     pub brightness: Arc<crate::brightness::Watch>,
     /// Whether the unit has outside power (power.rs).
     pub power: Arc<crate::power::Watch>,
+    opentherm: Arc<crate::opentherm::Watch>,
+    opentherm_platform: bool,
     mqtt: OnceLock<mqtt::Client>,
     /// The unit's wakes since nestlocal started (wake.rs).
     wakes: AtomicU64,
@@ -127,6 +129,8 @@ impl Bridge {
             occupancy: Arc::new(Occupancy::default()),
             brightness: Arc::new(crate::brightness::Watch::default()),
             power: Arc::new(crate::power::Watch::default()),
+            opentherm: Arc::new(crate::opentherm::Watch::default()),
+            opentherm_platform: crate::opentherm::supported_platform(nestlocal::device::current().name),
             mqtt: OnceLock::new(),
             wakes: AtomicU64::new(0),
             announced: Mutex::new(None),
@@ -272,6 +276,25 @@ impl Bridge {
         tokio::spawn(self.clone().keep_time());
         tokio::spawn(self.clone().keep_boost());
         tokio::spawn(connection.run(self.clone()));
+    }
+
+    pub(crate) fn opentherm_enabled(&self, dev: &Fields) -> bool {
+        self.opentherm_platform && crate::opentherm::enabled(dev)
+    }
+
+    /// Read the OpenTherm log without changing nlclient or its settings.
+    pub fn watch_opentherm(self: &Arc<Self>, settings: std::path::PathBuf) {
+        if !self.opentherm_platform { return; }
+        let bridge = Arc::downgrade(self);
+        let runtime = tokio::runtime::Handle::current();
+        crate::opentherm::watch(self.opentherm.clone(), crate::occupancy::EVENT_LOG.into(), settings, move || {
+            let bridge = bridge.clone();
+            runtime.spawn(async move {
+                if let Some(bridge) = bridge.upgrade() {
+                    bridge.publish_state();
+                }
+            });
+        });
     }
 
     /// Asks Home Assistant for the time (its time automation); the answer
@@ -581,6 +604,13 @@ impl Bridge {
         shown.insert("mqtt_reconnects".into(), reconnects.into());
         shown.insert("mqtt_last_disconnect".into(), last_end.map_or(Value::Null, Value::from));
         shown.insert("wakes".into(), self.wakes.load(Ordering::Relaxed).into());
+        if self.opentherm_enabled(dev) {
+            shown.extend(self.opentherm.shown());
+            if crate::opentherm::dhw_temperature_supported(dev) {
+                shown.insert("hot_water_temperature".into(), dev.get("hot_water_temperature")
+                    .filter(|v| v.as_f64().is_some_and(|t| t.is_finite())).cloned().unwrap_or(Value::Null));
+            }
+        }
         shown
     }
 
@@ -1089,6 +1119,92 @@ impl Bridge {
                     "payload_install" => "install",
                 },
             );
+        }
+
+        if self.opentherm_enabled(dev) {
+            // A missing or stale measurement is unavailable, not zero or OFF.
+            let available = |key: &str| fields! {
+                "availability_topic" => Value::Null,
+                "availability_mode" => "all",
+                "availability" => serde_json::json!([
+                    {"topic": format!("{}/availability", self.base)},
+                    {"topic": st.clone(), "value_template": format!("{{{{ 'online' if value_json.{key} is defined and value_json.{key} is not none else 'offline' }}}}")}
+                ]),
+            };
+            for (key, name, unit, class) in crate::opentherm::NUMBERS {
+                let mut c = available(key);
+                if matches!(key, "opentherm_return_temperature" | "opentherm_water_pressure") {
+                    // Optional boiler telemetry: can be enabled in HA if supported.
+                    c.insert("enabled_by_default".into(), false.into());
+                }
+                sensor(&mut add, key, name, unit, class, c);
+            }
+            if crate::opentherm::dhw_temperature_supported(dev) {
+                let mut c = available("hot_water_temperature");
+                c.extend(fields! {
+                    "value_template" => tmpl("hot_water_temperature"),
+                    "command_topic" => format!("{set}hot_water_temperature"),
+                    "min" => num(crate::commands::DHW_TARGET.0),
+                    "max" => num(crate::commands::DHW_TARGET.1),
+                    "step" => 1,
+                    "unit_of_measurement" => "°C",
+                    "device_class" => "temperature",
+                    "entity_category" => "config",
+                    "mode" => "slider",
+                });
+                add("number", "hot_water_temperature", "DHW Target Temperature", c);
+            }
+            // Optional graph series share the original sample, never substitute zero.
+            let dhw_capable = crate::opentherm::dhw_temperature_supported(dev)
+                || truthy(dev.get("has_hot_water_control"))
+                || self.opentherm.dhw_seen()
+                || self.opentherm.register_fields().contains_key("opentherm_boiler_dhw_setpoint");
+            for (i, (key, name)) in crate::opentherm::GRAPH_NUMBERS.iter().enumerate() {
+                if (i == 1 && !dhw_capable) || (i == 3 && !self.opentherm.combined_seen()) { continue; }
+                let mut c = available(key);
+                c.insert("enabled_by_default".into(), false.into());
+                c.insert("entity_category".into(), "diagnostic".into());
+                sensor(&mut add, key, name, "°C", "temperature", c);
+            }
+            for (key, name, class) in crate::opentherm::FLAGS {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => on_off(key), "device_class" => class});
+                if key == "opentherm_ch_active" {
+                    c.insert("entity_category".into(), "diagnostic".into());
+                    c.insert("enabled_by_default".into(), false.into());
+                }
+                add("binary_sensor", key, name, c);
+            }
+            for (key, name) in crate::opentherm::CODES {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "entity_category" => "diagnostic"});
+                if key == "opentherm_diagnostic_code" {
+                    c.insert("enabled_by_default".into(), false.into());
+                }
+                add("sensor", key, name, c);
+            }
+            // The register snapshot is slow and optional. Do not announce
+            // unacknowledged fields as working sensors or duplicate live telemetry.
+            let registers = self.opentherm.register_fields();
+            for &(key, name, unit, class) in crate::ot_registers::ENTITIES {
+                if !registers.contains_key(key) { continue; }
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "entity_category" => "diagnostic"});
+                if matches!(key, "opentherm_boiler_member_id" | "opentherm_boiler_product"
+                    | "opentherm_ch_limit_access" | "opentherm_dhw_access"
+                    | "opentherm_ch_min" | "opentherm_ch_max" | "opentherm_dhw_min" | "opentherm_dhw_max"
+                    | "opentherm_boiler_protocol") {
+                    c.insert("enabled_by_default".into(), false.into());
+                }
+                if !unit.is_empty() { c.insert("unit_of_measurement".into(), unit.into()); }
+                if !class.is_empty() { c.insert("device_class".into(), class.into()); }
+                add("sensor", key, name, c);
+            }
+            for (key, name) in crate::opentherm::TIMES {
+                let mut c = available(key);
+                c.extend(fields! {"value_template" => tmpl(key), "device_class" => "timestamp", "entity_category" => "diagnostic"});
+                add("sensor", key, name, c);
+            }
         }
 
         if rename {
@@ -1641,6 +1757,92 @@ pub mod tests {
             "Home Assistant shows it in its own unit"
         );
         assert_eq!(eco["step"], json!(1), "Home Assistant takes the step in its own unit");
+    }
+
+    #[test]
+    fn opentherm_discovery_is_gated_and_missing_readings_are_unavailable() {
+        let b = test_bridge();
+        let sh = obj(json!({"can_heat": true}));
+        let flow = "homeassistant/sensor/nestlocal_s/opentherm_flow_temperature/config";
+        let burner = "homeassistant/binary_sensor/nestlocal_s/opentherm_source_on/config";
+        let max = "homeassistant/sensor/nestlocal_s/opentherm_max_supply_temperature/config";
+        let dev = obj(json!({"heat_link_heat_type": "opentherm"}));
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let config: Value = serde_json::from_str(&configs[burner]).unwrap();
+        assert_eq!(config["availability_mode"], json!("all"));
+        assert!(config.get("availability_topic").is_none());
+        assert!(config["availability"][1]["value_template"].as_str().unwrap().contains("is not none"));
+        assert!(configs.contains_key(flow));
+        assert_eq!(config["name"], json!("Burner Active"));
+        let ch: Value = serde_json::from_str(&configs["homeassistant/binary_sensor/nestlocal_s/opentherm_ch_active/config"]).unwrap();
+        assert_eq!(ch["enabled_by_default"], json!(false));
+        assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config"));
+        let config: Value = serde_json::from_str(&configs[max]).unwrap();
+        assert!(config.get("command_topic").is_none());
+        assert_eq!(b.shown(&dev, &sh)["opentherm_source_on"], Value::Null);
+        let dev = obj(json!({"heat_link_heat_type": "onoff"}));
+        b.announce(&dev, &sh);
+        assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(flow));
+        assert!(!b.shown(&dev, &sh).contains_key("opentherm_source_on"));
+    }
+
+    #[test]
+    fn opentherm_register_discovery_is_optional_and_diagnostic() {
+        let b = test_bridge();
+        let dev = obj(json!({"heat_link_heat_type":"opentherm"}));
+        let sh = obj(json!({"can_heat":true}));
+        let target = "homeassistant/sensor/nestlocal_s/opentherm_boiler_dhw_setpoint/config";
+        let unsupported = "homeassistant/sensor/nestlocal_s/opentherm_dhw_flow_rate/config";
+        b.announce(&dev, &sh);
+        assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(target));
+        b.opentherm.update_registers(obj(json!({"opentherm_boiler_dhw_setpoint":52})));
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let config: Value = serde_json::from_str(&configs[target]).unwrap();
+        assert_eq!(config["name"], json!("Boiler DHW Setpoint"));
+        assert_eq!(config["entity_category"], json!("diagnostic"));
+        assert!(!configs.contains_key(unsupported));
+        assert_eq!(b.shown(&dev,&sh)["opentherm_boiler_dhw_setpoint"],json!(52));
+    }
+
+    #[test]
+    fn opentherm_dhw_target_discovery_and_command() {
+        let b = test_bridge();
+        let sh = obj(json!({"can_heat": true}));
+        let dev = obj(json!({"heat_link_heat_type": "opentherm", "boiler_type": "combi", "has_hot_water_temperature": true, "has_hot_water_control": false, "hot_water_temperature": 52}));
+        let topic = "homeassistant/number/nestlocal_s/hot_water_temperature/config";
+        let optional = "homeassistant/sensor/nestlocal_s/opentherm_water_pressure/config";
+        b.announce(&dev, &sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        let config: Value = serde_json::from_str(&configs[topic]).unwrap();
+        assert_eq!(config["command_topic"], json!("nestlocal/S/set/hot_water_temperature"));
+        assert_eq!(config["min"].as_f64(), Some(40.0));
+        assert_eq!(config["max"].as_f64(), Some(65.0));
+        assert_eq!(config["mode"], json!("slider"));
+        let graph = "homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config";
+        let graph_config: Value = serde_json::from_str(&configs[graph]).unwrap();
+        assert_eq!(graph_config["enabled_by_default"], json!(false));
+        assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_combined_flow_temperature/config"));
+        let pressure: Value = serde_json::from_str(&configs[optional]).unwrap();
+        assert_eq!(pressure["enabled_by_default"], json!(false));
+        assert_eq!(b.shown(&dev, &sh)["hot_water_temperature"], json!(52));
+        assert!(b.fields("hot_water_temperature", "51").is_err());
+        b.store.merge("device.S", &dev, 0, 0, true);
+        assert!(b.fields("hot_water_temperature", "39").is_err());
+        assert!(b.fields("hot_water_temperature", "66").is_err());
+        for (arg, expected) in [("40", 40.0), ("61", 61.0), ("65", 65.0)] {
+            let (bucket, fields) = b.fields("hot_water_temperature", arg).unwrap().unwrap();
+            assert_eq!(bucket, "device");
+            assert_eq!(fields["hot_water_temperature"].as_f64(), Some(expected));
+        }
+        assert!(b.fields("hot_water_temperature", "NaN").is_err());
+        let (bucket, fields) = b.fields("hot_water_temperature", "51").unwrap().unwrap();
+        assert_eq!(bucket, "device");
+        assert_eq!(fields["hot_water_temperature"].as_f64(), Some(51.0));
+        let unsupported = obj(json!({"heat_link_heat_type": "opentherm", "boiler_type": "combi", "has_hot_water_temperature": false}));
+        b.announce(&unsupported, &sh);
+        assert!(!b.announced.lock().unwrap().as_ref().unwrap().contains_key(topic));
     }
 
     #[test]

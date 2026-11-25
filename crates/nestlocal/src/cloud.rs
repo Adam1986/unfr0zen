@@ -15,6 +15,9 @@
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -184,6 +187,134 @@ fn int(v: Option<&Value>) -> i64 {
     v.and_then(Value::as_f64).map_or(0, |f| f as i64)
 }
 
+// Temporary, local-only diagnostic capture. An operator explicitly creates
+// this private directory to enable it, and removes/renames it to disable it.
+const HEATLINK_CAPTURE_DIR: &str = "/media/scratch/opentherm-capture";
+const MAX_HEATLINK_CAPTURE_BYTES: usize = 1024 * 1024;
+const MAX_HEATLINK_CAPTURES: usize = 8;
+const MAX_REGISTER_CAPTURES: usize = 16;
+const MAX_REGISTER_DECODED_BYTES: usize = 2 * 1024 * 1024;
+const MAX_REGISTER_CAPTURE_BYTES: usize = 256 * 1024;
+
+/// Match only the known event names (including their schema headers) or
+/// the original application's register-specific debug lines.
+fn register_log_line(line: &str, kind: &str) -> bool {
+    if kind.eq_ignore_ascii_case("clientevent") {
+        return line.split_whitespace().nth(1).is_some_and(|event| matches!(
+            event.trim_start_matches('%'),
+            "RemoteModulatingBoilerOpenThermLogs" | "RemoteModulatingBoilerInfo" |
+            "RemoteModulatingBoilerCounters"
+        ));
+    }
+    line.contains("heatlink controller: OT reg ") ||
+        line.contains("heatlink controller: OT Protocol Data:")
+}
+
+/// Decode only bounded gzip or plain-text uploads, retaining matching lines
+/// rather than entire client logs. An oversized or invalid upload is skipped.
+fn select_register_lines(kind: &str, body: &[u8]) -> io::Result<Vec<u8>> {
+    if body.is_empty() || body.len() > MAX_HEATLINK_CAPTURE_BYTES {
+        return Ok(Vec::new());
+    }
+    let decoded = if body.starts_with(&[0x1f, 0x8b]) {
+        let mut data = Vec::new();
+        flate2::read::MultiGzDecoder::new(body)
+            .take((MAX_REGISTER_DECODED_BYTES + 1) as u64).read_to_end(&mut data)?;
+        if data.len() > MAX_REGISTER_DECODED_BYTES {
+            return Ok(Vec::new());
+        }
+        data
+    } else {
+        body.to_vec()
+    };
+    let mut selected = Vec::new();
+    for line in decoded.split(|b| *b == b'\n') {
+        if line.len() > 16 * 1024 { continue; }
+        let Ok(text) = std::str::from_utf8(line) else { continue; };
+        if !register_log_line(text, kind) { continue; }
+        if selected.len() + line.len() + 1 > MAX_REGISTER_CAPTURE_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "selected register log exceeds limit"));
+        }
+        selected.extend_from_slice(line);
+        selected.push(b'\n');
+    }
+    Ok(selected)
+}
+
+fn capture_register_upload(dir: &Path, headers: &HeaderMap, kind: &str, body: &[u8]) -> io::Result<()> {
+    let kind = if kind.eq_ignore_ascii_case("clientevent") { "clientevent" } else { "clientdebug" };
+    let selected = select_register_lines(kind, body)?;
+    if selected.is_empty() { return Ok(()); }
+    let sequence = headers.get("x-nl-log-file-sequence-number")
+        .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    let name = match sequence {
+        Some(n) => format!("register-{kind}-{n}.txt"),
+        None => format!("register-{kind}-time-{}.txt", now_ms()),
+    };
+    save_capture(dir, &name, &selected, "register-", MAX_REGISTER_CAPTURES)
+}
+
+fn save_capture(dir: &Path, name: &str, body: &[u8], prefix: &str, max: usize) -> io::Result<()> {
+    let path = dir.join(name);
+    if path.exists() { return Ok(()); }
+    let count = std::fs::read_dir(dir)?.filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).take(max).count();
+    if count >= max {
+        logf!("heatlink capture: {prefix} quota full; retrieve captured files before collecting more");
+        return Ok(());
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if let Err(e) = file.write_all(body).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    logf!("heatlink capture: saved {name}, {} bytes", body.len());
+    Ok(())
+}
+
+/// Preserve original Heat Link bytes or selected register log lines, never
+/// HTTP credentials, headers, or whole ordinary event logs. Do not alter the cloud acknowledgement
+/// on a capture error: this is a best-effort diagnostic feature.
+fn capture_heatlink_upload(dir: &Path, headers: &HeaderMap, body: &[u8]) -> io::Result<()> {
+    let meta = match std::fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "capture directory must be private"));
+    }
+    let kind = headers.get("x-nl-log-file-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if kind.eq_ignore_ascii_case("clientevent") || kind.eq_ignore_ascii_case("clientdebug") {
+        return capture_register_upload(dir, headers, kind, body);
+    }
+    if !kind.eq_ignore_ascii_case("heatlinkevent") && !kind.eq_ignore_ascii_case("nlhlevent") {
+        // Only report the classification, not the request body or any auth
+        // headers. A different firmware type can be identified from this.
+        let safe_kind = if !kind.is_empty() && kind.len() <= 40 && kind.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+        }) { kind } else { "unknown" };
+        logf!("heatlink capture: ignored upload type={safe_kind}, bytes={}", body.len());
+        return Ok(());
+    }
+    if body.is_empty() || body.len() > MAX_HEATLINK_CAPTURE_BYTES {
+        logf!("heatlink capture: skipped empty or oversized upload ({} bytes)", body.len());
+        return Ok(());
+    }
+    let sequence = headers.get("x-nl-log-file-sequence-number")
+        .and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    let name = match sequence {
+        Some(n) => format!("heatlink-{n}.bin"),
+        None => format!("heatlink-time-{}.bin", now_ms()),
+    };
+    save_capture(dir, &name, body, "heatlink-", MAX_HEATLINK_CAPTURES)
+}
+
 impl Cloud {
     /// Serves nlclient over HTTPS on listen, for good; the error is why it
     /// stopped.
@@ -252,7 +383,14 @@ impl Cloud {
         match path {
             "/entry" => self.entry(),
             "/passphrase" => self.reply(&json!({"value": "LOCAL00", "expires": now_ms() + 3_600_000})),
-            "/upload" => self.reply(&json!({"status": "ok"})), // logs and diagnostics: dropped
+            "/upload" => {
+                if *method == Method::POST {
+                    if let Err(e) = capture_heatlink_upload(Path::new(HEATLINK_CAPTURE_DIR), headers, body) {
+                        logf!("heatlink capture: {e}");
+                    }
+                }
+                self.reply(&json!({"status": "ok"}))
+            }
             "/schedules/create" => self.create_schedule(body),
             _ if path.starts_with("/transport/") => self.transport(path, body),
             _ if path.starts_with("/weather/") => self.weather(uri.query()),
@@ -490,6 +628,72 @@ mod tests {
         (parts.status, parts.headers, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    #[test]
+    fn heatlink_capture_filters_and_limits_uploads() {
+        let dir = std::env::temp_dir().join(format!("nestlocal-heatlink-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("heatlinkevent"));
+        headers.insert("x-nl-log-file-sequence-number", HeaderValue::from_static("38332"));
+        let body = b"\x1f\x8b\x00\xff";
+        capture_heatlink_upload(&dir, &headers, body).unwrap();
+        assert!(!dir.exists(), "disabled by default");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("clientevent"));
+        capture_heatlink_upload(&dir, &headers, b"2026-11-24T00:00:00 CurrentState private-data\n").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("heatlinkevent"));
+        capture_heatlink_upload(&dir, &headers, &vec![0; MAX_HEATLINK_CAPTURE_BYTES + 1]).unwrap();
+        capture_heatlink_upload(&dir, &headers, b"").unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        capture_heatlink_upload(&dir, &headers, body).unwrap();
+        let path = dir.join("heatlink-38332.bin");
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        capture_heatlink_upload(&dir, &headers, b"duplicate").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        for seq in 0..MAX_HEATLINK_CAPTURES {
+            headers.insert("x-nl-log-file-sequence-number", HeaderValue::from_bytes(seq.to_string().as_bytes()).unwrap());
+            capture_heatlink_upload(&dir, &headers, body).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), MAX_HEATLINK_CAPTURES);
+        assert!(!dir.join(format!("heatlink-{}.bin", MAX_HEATLINK_CAPTURES - 1)).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn heatlink_capture_selects_register_events_and_debug() {
+        let dir = std::env::temp_dir().join(format!("nestlocal-register-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("clientevent"));
+        headers.insert("x-nl-log-file-sequence-number", HeaderValue::from_static("42"));
+        let input = b"2026-11-24T00:00:00 CurrentState private-data\n2026-11-24T00:00:00 %RemoteModulatingBoilerInfo schema\n2026-11-24T00:00:00 RemoteModulatingBoilerOpenThermLogs 19 256\n2026-11-24T00:00:00 RemoteModulatingBoilerCounters 1 2\n";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(input).unwrap();
+        let compressed = encoder.finish().unwrap();
+        capture_heatlink_upload(&dir, &headers, &compressed).unwrap();
+        let saved = std::fs::read_to_string(dir.join("register-clientevent-42.txt")).unwrap();
+        assert_eq!(saved.lines().count(), 3);
+        assert!(!saved.contains("private-data"));
+        assert!(saved.contains("%RemoteModulatingBoilerInfo"));
+        assert!(saved.contains("RemoteModulatingBoilerOpenThermLogs 19 256"));
+        assert_eq!(std::fs::metadata(dir.join("register-clientevent-42.txt")).unwrap().permissions().mode() & 0o777, 0o600);
+        headers.insert("x-nl-log-file-type", HeaderValue::from_static("clientdebug"));
+        capture_heatlink_upload(&dir, &headers, b"other private-data\nheatlink controller: OT reg 19: dlb 0x01\nheatlink controller: OT Protocol Data: OpenThermCommsReplies = 1\n").unwrap();
+        let debug = std::fs::read_to_string(dir.join("register-clientdebug-42.txt")).unwrap();
+        assert_eq!(debug.lines().count(), 2);
+        assert!(!debug.contains("private-data"));
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&vec![b'x'; MAX_REGISTER_DECODED_BYTES + 1]).unwrap();
+        assert!(select_register_lines("clientevent", &encoder.finish().unwrap()).unwrap().is_empty());
+        assert!(select_register_lines("clientevent", b"\x1f\x8b\x00").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_custom_schedule_gets_a_bucket_of_its_own() {
         let c = cloud();
@@ -508,6 +712,14 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
             assert!(reply.contains("error_description"), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn heatlink_capture_keeps_upload_acknowledgement() {
+        let c = cloud();
+        let (status, _, response) = call(&c, "/upload", "ordinary upload").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, r#"{"status":"ok"}"#);
     }
 
     #[tokio::test]
