@@ -76,6 +76,7 @@ pub struct Bridge {
     pub power: Arc<crate::power::Watch>,
     opentherm: Arc<crate::opentherm::Watch>,
     opentherm_platform: bool,
+    supply_pilot: OnceLock<crate::opentherm_supply::Pilot>,
     prediction: Mutex<Option<crate::prediction::Sample>>,
     mqtt: OnceLock<mqtt::Client>,
     /// The unit's wakes since nestlocal started (wake.rs).
@@ -131,6 +132,7 @@ impl Bridge {
             brightness: Arc::new(crate::brightness::Watch::default()),
             power: Arc::new(crate::power::Watch::default()),
             opentherm: Arc::new(crate::opentherm::Watch::default()),
+            supply_pilot: OnceLock::new(),
             opentherm_platform: crate::opentherm::supported_platform(nestlocal::device::current().name),
             prediction: Mutex::new(None),
             mqtt: OnceLock::new(),
@@ -289,6 +291,25 @@ impl Bridge {
         if !self.opentherm_platform { return; }
         let bridge = Arc::downgrade(self);
         let runtime = tokio::runtime::Handle::current();
+        if let Some(pilot) = crate::opentherm_supply::Pilot::load(settings.clone()) {
+            let _ = self.supply_pilot.set(pilot);
+            let bridge = Arc::downgrade(self);
+            tokio::spawn(async move {
+                let mut last = None;
+                loop {
+                    let Some(b) = bridge.upgrade() else { break; };
+                    let Some(pilot) = b.supply_pilot.get() else { break; };
+                    pilot.poll(&b.opentherm);
+                    let current = pilot.snapshot(&b.opentherm);
+                    if last != Some(current) {
+                        last = Some(current);
+                        b.publish_state();
+                    }
+                    drop(b);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            });
+        }
         crate::opentherm::watch(self.opentherm.clone(), crate::occupancy::EVENT_LOG.into(), settings, move || {
             let bridge = bridge.clone();
             runtime.spawn(async move {
@@ -485,6 +506,21 @@ impl Bridge {
                 }
                 None => logf!("mqtt: theme {name:?}: themes are not installed (-themes)"),
             }
+        } else if topic == format!("{}/set/{}", self.base, crate::opentherm_supply::CONTROL) {
+            let result = (|| {
+                let pilot = self.supply_pilot.get().ok_or("OpenTherm supply pilot not enabled")?;
+                if !self.live.as_ref().is_some_and(|l| l.alive()) { return Err("thermostat is offline".to_string()); }
+                let dev = self.store.get(&format!("device.{}", self.serial)).ok_or("no device bucket")?;
+                if !self.opentherm_enabled(&dev.value) { return Err("not OpenTherm".to_string()); }
+                let sh = self.store.get(&format!("shared.{}", self.serial)).ok_or("no shared bucket")?;
+                if sh.value.get("hvac_heater_state").and_then(Value::as_bool) == Some(true) {
+                    return Err("heating active: pilot requires idle diagnostics".to_string());
+                }
+                let arg = std::str::from_utf8(payload).map_err(|_| "invalid command encoding")?;
+                pilot.submit(arg, &self.opentherm)
+            })();
+            if let Err(e) = result { logf!("mqtt: OpenTherm supply pilot: {e}"); }
+            self.publish_state();
         } else if topic.starts_with(&format!("{}/set/", self.base)) {
             self.command(topic, payload);
         }
@@ -642,6 +678,14 @@ impl Bridge {
         shown.insert("wakes".into(), self.wakes.load(Ordering::Relaxed).into());
         if self.opentherm_enabled(dev) {
             shown.extend(self.opentherm.shown());
+            if let Some(pilot) = self.supply_pilot.get() {
+                let (ready,status,_) = pilot.snapshot(&self.opentherm);
+                let heating = sh.get("hvac_heater_state").and_then(Value::as_bool) == Some(true);
+                shown.insert("opentherm_supply_write_ready".into(), (ready && !heating).into());
+                shown.insert("opentherm_supply_write_status".into(), status.into());
+                shown.insert(crate::opentherm_supply::CONTROL.into(),
+                    shown.get("opentherm_max_supply_temperature").cloned().unwrap_or(Value::Null));
+            }
             if crate::opentherm::dhw_temperature_supported(dev) {
                 shown.insert("hot_water_temperature".into(), dev.get("hot_water_temperature")
                     .filter(|v| v.as_f64().is_some_and(|t| t.is_finite())).cloned().unwrap_or(Value::Null));
@@ -1218,6 +1262,29 @@ impl Bridge {
                 }
                 sensor(&mut add, key, name, unit, class, c);
             }
+            if let Some(pilot) = self.supply_pilot.get().filter(|p| p.discovered()) {
+                let key = crate::opentherm_supply::CONTROL;
+                let (min,max) = pilot.limits();
+                let mut c = available(key);
+                c.insert("availability".into(), serde_json::json!([
+                    {"topic": format!("{}/availability", self.base)},
+                    {"topic": st.clone(), "value_template": "{{ 'online' if value_json.opentherm_supply_write_ready | default(false) else 'offline' }}"}
+                ]));
+                c.extend(fields! {
+                    "value_template" => tmpl(key),
+                    "command_topic" => format!("{set}{key}"),
+                    "min" => min, "max" => max, "step" => 1,
+                    "unit_of_measurement" => "°C", "device_class" => "temperature",
+                    "mode" => "box", "optimistic" => false, "retain" => false,
+                    // Do not queue HA commands while the thermostat is offline.
+                    "qos" => 0,
+                });
+                add("number", key, "Pro Setup Maximum Supply Temperature Control", c);
+                add("sensor", "opentherm_supply_write_status", "Supply Temperature Command Status", fields! {
+                    "value_template" => tmpl("opentherm_supply_write_status"),
+                    "entity_category" => "diagnostic",
+                });
+            }
             if crate::opentherm::dhw_temperature_supported(dev) {
                 let mut c = available("hot_water_temperature");
                 c.extend(fields! {
@@ -1297,7 +1364,8 @@ impl Bridge {
             for (component, key) in [("switch", "preconditioning_enabled"),
                 ("switch", "radiant_control_enabled"), ("number", "true_radiant_max_duration"),
                 ("sensor", "next_scheduled_setpoint"), ("sensor", "next_scheduled_temperature"),
-                ("sensor", "predicted_heating_start"), ("sensor", "predicted_preheating_duration")] {
+                ("sensor", "predicted_heating_start"), ("sensor", "predicted_preheating_duration"),
+                ("number", crate::opentherm_supply::CONTROL), ("sensor", "opentherm_supply_write_status")] {
                 let topic = format!("{}/{component}/{id}/{key}/config", self.discovery);
                 if !configs.contains_key(&topic) { self.publish(&topic, true, b""); }
             }
@@ -1362,7 +1430,7 @@ impl mqtt::Handler for Bridge {
 
     fn message_with_retain(&self, topic: &str, payload: &[u8], retained: bool) {
         if retained && topic.strip_prefix(&format!("{}/set/", self.base))
-            .is_some_and(|name| matches!(name, "boiler_supply_temperature" | "opentherm_max_supply_temperature"))
+            .is_some_and(|name| matches!(name, "boiler_supply_temperature" | "opentherm_max_supply_temperature" | crate::opentherm_supply::CONTROL))
         {
             logf!("mqtt: ignored retained OpenTherm supply temperature command");
             return;
@@ -1944,6 +2012,7 @@ pub mod tests {
             for (topic, payload) in [
                 ("nestlocal/S/set/boiler_supply_temperature", &b"55"[..]),
                 ("nestlocal/S/set/opentherm_max_supply_temperature", &b"55"[..]),
+                ("nestlocal/S/set/opentherm_max_supply_temperature_control", &b"55"[..]),
                 ("nestlocal/S/set/raw/device", &br#"{"boiler_supply_temperature":55}"#[..]),
             ] {
                 mqtt::Handler::message_with_retain(&*b, topic, payload, retained);
@@ -1974,6 +2043,7 @@ pub mod tests {
         assert!(config.get("availability_topic").is_none());
         assert!(config["availability"][1]["value_template"].as_str().unwrap().contains("is not none"));
         assert!(configs.contains_key(flow));
+        assert!(!configs.contains_key("homeassistant/number/nestlocal_s/opentherm_max_supply_temperature_control/config"));
         assert_eq!(config["name"], json!("Burner Active"));
         assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
         assert_eq!(config["device"]["via_device"], json!("nestlocal_s"));
