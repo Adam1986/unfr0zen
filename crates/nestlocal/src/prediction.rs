@@ -126,9 +126,9 @@ mod tests {
         let read = |d: &Fields, st: &Fields, w: &Object, s: Option<Sample>, at| values(d, st, Some(w), s, at, &chrono::Utc);
         let v = read(&dev, &state, &week, Some(sample), now);
         assert_eq!(v[KEYS[0]], json!("2026-11-25T12:00:00Z"));
-        assert_eq!(v[KEYS[1]], json!(21.0));
+        assert_eq!(v[KEYS[1]].as_f64(), Some(21.0));
         assert_eq!(v[KEYS[2]], json!("2026-11-25T11:00:00Z"));
-        assert_eq!(v[KEYS[3]], json!(60.0));
+        assert_eq!(v[KEYS[3]].as_f64(), Some(60.0));
         for s in [None, Some(Sample{deadline: sample.logged_ms/1000+3600,..sample}), Some(Sample{deadline:1795608000,..sample})] {
             assert!(read(&dev, &state, &week, s, now)[KEYS[2]].is_null());
         }
