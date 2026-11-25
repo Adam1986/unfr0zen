@@ -403,7 +403,7 @@ impl Bridge {
                 if !supported { return Err("True Radiant maximum duration not reported".into()); }
                 let hours = float(arg).filter(|h| (0.0..=5.0).contains(h) && h.fract() == 0.0)
                     .ok_or_else(|| "expected a whole number of hours, 0-5".to_string())?;
-                device(fields! {"max_nighttime_preconditioning_seconds" => (hours as u64 * 3600)})
+                device(fields! {"max_nighttime_preconditioning_seconds" => hours as u64 * 3600})
             }
 
             "hot_water_temperature" => {
