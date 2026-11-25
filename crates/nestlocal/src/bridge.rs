@@ -1359,6 +1359,18 @@ impl mqtt::Handler for Bridge {
     fn message(&self, topic: &str, payload: &[u8]) {
         Bridge::message(self, topic, payload);
     }
+
+    fn message_with_retain(&self, topic: &str, payload: &[u8], retained: bool) {
+        if retained && topic.strip_prefix(&format!("{}/set/", self.base))
+            .is_some_and(|name| matches!(name, "boiler_supply_temperature" | "opentherm_max_supply_temperature"))
+        {
+            logf!("mqtt: ignored retained OpenTherm supply temperature command");
+            return;
+        }
+        // Other messages keep their original behaviour. In particular,
+        // weather and HA status depend on retained broker deliveries.
+        Bridge::message(self, topic, payload);
+    }
 }
 
 /// Convenience presets for the native Matter select, in minutes.
@@ -1917,6 +1929,34 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         assert!(configs.contains_key(radiant) && !configs.contains_key(duration));
         assert!(!configs.contains_key(early));
+    }
+
+    #[test]
+    fn opentherm_retained_commands_leave_weather_and_readback_intact() {
+        let b = test_bridge();
+        b.store.merge("device.S", &obj(json!({
+            "heat_link_heat_type": "opentherm",
+            "boiler_supply_temperature": 60,
+            "has_boiler_supply_temperature": true
+        })), 3, 100, true);
+        let before = b.store.get("device.S").unwrap();
+        for retained in [false, true] {
+            for (topic, payload) in [
+                ("nestlocal/S/set/boiler_supply_temperature", &b"55"[..]),
+                ("nestlocal/S/set/opentherm_max_supply_temperature", &b"55"[..]),
+                ("nestlocal/S/set/raw/device", &br#"{"boiler_supply_temperature":55}"#[..]),
+            ] {
+                mqtt::Handler::message_with_retain(&*b, topic, payload, retained);
+            }
+        }
+        let after = b.store.get("device.S").unwrap();
+        assert_eq!(before.value, after.value);
+        assert_eq!(before.revision, after.revision);
+        mqtt::Handler::message_with_retain(&*b, "nestlocal/S/set/outdoor_temperature", b"-3.4", true);
+        mqtt::Handler::message_with_retain(&*b, "nestlocal/S/set/outdoor_humidity", b"82", true);
+        let weather = b.outdoor.answer().expect("retained weather still works");
+        assert_eq!(weather["current"]["temp_c"].as_f64(), Some(-3.4));
+        assert_eq!(weather["current"]["humidity"].as_f64(), Some(82.0));
     }
 
     #[test]
