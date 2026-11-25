@@ -136,6 +136,16 @@ impl Transaction {
     }
 }
 
+// Read-only mode 3 worker heartbeat (separate from an ACK). A live PID
+// and fresh timestamp are necessary but not proof of main-thread execution.
+// Managed writes must use a different capability/mode value.
+pub(crate) fn auto_worker_ready(bytes: &[u8], generation: Generation, now: u32) -> bool {
+    if bytes.len() != 16 || generation.pid <= 1 || generation.start_ticks == 0 { return false; }
+    let word = |i: usize| u32::from_le_bytes(bytes[i*4..i*4+4].try_into().unwrap());
+    word(0) == 0x31525457 && word(1) == generation.pid && word(3) == 3
+        && word(2) != 0 && now.checked_sub(word(2)).is_some_and(|age| age <= 6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +155,18 @@ mod tests {
         encode([ACK_MAGIC, 42, 77, status, before * FIXED, after * FIXED])
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
+    #[test]
+    fn auto_worker_heartbeat_is_fresh_and_mode_specific() {
+        let record: Vec<u8> = [0x31525457u32, 42, 1000, 3].into_iter().flat_map(u32::to_le_bytes).collect();
+        assert!(auto_worker_ready(&record, GEN, 1002));
+        assert!(!auto_worker_ready(&record, GEN, 1007));
+        assert!(!auto_worker_ready(&record, GEN, 999));
+        assert!(!auto_worker_ready(&record[..15], GEN, 1002));
+        assert!(!auto_worker_ready(&record, Generation {pid:43,..GEN}, 1002));
+        let mut wrong_mode = record.clone();
+        wrong_mode[12] = 2;
+        assert!(!auto_worker_ready(&wrong_mode, GEN, 1002));
+    }
     #[test]
     fn managed_bounds_and_records() {
         assert!(Limits::new(0,55).is_none());
