@@ -635,6 +635,14 @@ impl Bridge {
             "sw_version" => dev.get("current_version").cloned().unwrap_or(Value::Null),
             "serial_number" => self.serial.clone(),
         };
+        // A logical boiler device, not another physical thermostat. Keep the
+        // discovery topics, default entity IDs and unique IDs on the old root.
+        let boiler_device = fields! {
+            "identifiers" => vec![format!("{id}_opentherm")],
+            "name" => format!("{} – OpenTherm", device["name"].as_str().unwrap_or("Nest Thermostat")),
+            "model" => "OpenTherm boiler",
+            "via_device" => id.clone(),
+        };
         let st = format!("{}/state", self.base);
         let set = format!("{}/set/", self.base);
         let mut configs = BTreeMap::new(); // discovery topic -> config
@@ -643,7 +651,13 @@ impl Bridge {
                 "name" => if name.is_empty() { Value::Null } else { name.into() }, // null: the device's own name
                 "unique_id" => format!("{id}_{key}"),
                 "default_entity_id" => format!("{component}.{root}_{key}"),
-                "device" => Value::Object(device.clone()),
+                // The Nest CH limit belongs with the thermostat settings (read-only
+                // for now). All boiler telemetry belongs on its linked device.
+                "device" => Value::Object(if key.starts_with("opentherm_")
+                    && key != "opentherm_max_supply_temperature"
+                    && matches!(component, "sensor" | "binary_sensor") {
+                    boiler_device.clone()
+                } else { device.clone() }),
                 "availability_topic" => format!("{}/availability", self.base),
                 "state_topic" => st.clone(),
                 // Commands at QoS 1, which the broker queues for the unit's
@@ -1775,11 +1789,18 @@ pub mod tests {
         assert!(config["availability"][1]["value_template"].as_str().unwrap().contains("is not none"));
         assert!(configs.contains_key(flow));
         assert_eq!(config["name"], json!("Burner Active"));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
+        assert_eq!(config["device"]["via_device"], json!("nestlocal_s"));
+        assert_eq!(config["unique_id"], json!("nestlocal_s_opentherm_source_on"));
+        assert_eq!(config["default_entity_id"], json!("binary_sensor.nestlocal_s_opentherm_source_on"));
+        let flow_config: Value = serde_json::from_str(&configs[flow]).unwrap();
+        assert_eq!(flow_config["device"], config["device"]);
         let ch: Value = serde_json::from_str(&configs["homeassistant/binary_sensor/nestlocal_s/opentherm_ch_active/config"]).unwrap();
         assert_eq!(ch["enabled_by_default"], json!(false));
         assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config"));
         let config: Value = serde_json::from_str(&configs[max]).unwrap();
         assert!(config.get("command_topic").is_none());
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s"]));
         assert_eq!(b.shown(&dev, &sh)["opentherm_source_on"], Value::Null);
         let dev = obj(json!({"heat_link_heat_type": "onoff"}));
         b.announce(&dev, &sh);
@@ -1801,6 +1822,7 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let config: Value = serde_json::from_str(&configs[target]).unwrap();
         assert_eq!(config["name"], json!("Boiler DHW Setpoint"));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
         assert_eq!(config["entity_category"], json!("diagnostic"));
         assert!(!configs.contains_key(unsupported));
         assert_eq!(b.shown(&dev,&sh)["opentherm_boiler_dhw_setpoint"],json!(52));
@@ -1817,12 +1839,15 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let config: Value = serde_json::from_str(&configs[topic]).unwrap();
         assert_eq!(config["command_topic"], json!("nestlocal/S/set/hot_water_temperature"));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s"]));
+        assert_eq!(config["unique_id"], json!("nestlocal_s_hot_water_temperature"));
         assert_eq!(config["min"].as_f64(), Some(40.0));
         assert_eq!(config["max"].as_f64(), Some(65.0));
         assert_eq!(config["mode"], json!("slider"));
         let graph = "homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config";
         let graph_config: Value = serde_json::from_str(&configs[graph]).unwrap();
         assert_eq!(graph_config["enabled_by_default"], json!(false));
+        assert_eq!(graph_config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
         assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_combined_flow_temperature/config"));
         let pressure: Value = serde_json::from_str(&configs[optional]).unwrap();
         assert_eq!(pressure["enabled_by_default"], json!(false));

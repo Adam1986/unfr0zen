@@ -234,6 +234,7 @@ mosquitto_pub -h broker.lan -t 'nestlocal/&lt;serial&gt;/set/target' -m 21.5</co
             </div>
 
             <h3>OpenTherm telemetry (MQTT only)</h3>
+            <p>Home Assistant groups boiler measurements, status, optional graph sensors and diagnostics on a logical OpenTherm device linked to the thermostat via MQTT discovery. The Nest CH temperature limit (currently read-only) and supported DHW target control remain on the main thermostat device. Existing discovery topics, entity keys and unique IDs are unchanged. No separate boiler device is announced on unsupported platforms or non-OpenTherm configurations.</p>
             <p>On the validated third-generation Diamond3 platform with an OpenTherm Heat Link, the retained <code>state</code> object also includes read-only boiler telemetry from nlclient's event log and settings. Diagnostic readings are buffered by nlclient. Each stream expires independently after ten minutes; unavailable readings are <code>null</code>, not zero or false. The timestamps show when readings were measured or calculated, not when MQTT published them.</p>
             <ul>
                 <li><code>opentherm_max_supply_temperature</code>: configured maximum CH supply temperature (°C), read-only.</li>
