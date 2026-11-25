@@ -639,14 +639,19 @@ u32 custom_swap(void *display, void *surface) {
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
 #define OT_EVENT_HANDLER ot_dry_event
 #define OT_POLL ot_poll_dry
-#elif UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+#elif UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
 #define OT_EVENT_HANDLER ot_auto_event
 #define OT_POLL ot_poll_auto
+#else
+#define OT_EVENT_HANDLER ot_managed_event
+#define OT_POLL ot_poll_managed
+#endif
 /* A live worker heartbeat, not a native command acknowledgement. The
  * record is atomically replaced in tmpfs; never interpret keeper.pid
  * alone as proof that the thread was created successfully. */
 static void ot_worker_ready(void) {
-    u32 record[4] = {0x31525457u, (u32)native_getpid(), native_time(0), 3};
+    u32 record[4] = {0x31525457u, (u32)native_getpid(), native_time(0), UNFR0ZEN_OT_SUPPLY_EXPERIMENT};
     void *file = native_fopen(RUN "ot-supply.ready.tmp", "wb");
     if (!file) return;
     unsigned int n = native_fwrite(record, 1, sizeof(record), file);
@@ -663,7 +668,7 @@ static void *keeper(void *globals) {
     for (;;) {
         native_usleep(KEEPER_PERIOD * 1000000);
 #if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
         /* Factory startup can precede full client/queue initialisation.
          * Wait until the existing accessor confirms ownership and the
          * native screen guard is clear. No native heating state is read
@@ -697,7 +702,7 @@ static void keeper_start(void *globals) {
     if (HANDOVER != HANDOVER_SWAP || read_pid(KEEPER) != pid)
         return;
     unsigned int thread;
-#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && (UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4)
     if (native_pthread_create(&thread, 0, keeper, globals))
         rename_setting(KEEPER, RUN "keeper.failed");
 #else
@@ -844,6 +849,14 @@ extern void native_ot_supply_set(void *, uint32_t);
  * Claim both files before touching native state. Never retry a taken request.
  * The optional experimental object is accepted by the builder only for the
  * exact reviewed stock ELF. No MQTT producer is enabled. */
+/* Separate files from the manual V4/V5/V6 trials. No managed producer
+ * is enabled yet. The producer must serialize transactions and never
+ * replace a claimed record or automatically retry an uncertain write. */
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+#define OT_COMMAND RUN "ot-managed."
+#else
+#define OT_COMMAND RUN "ot-supply."
+#endif
 static int ot_read_record(const char *path, void *record, unsigned int size) {
     void *file = native_fopen(path, "rb");
     if (!file) return 0;
@@ -854,27 +867,32 @@ static int ot_read_record(const char *path, void *record, unsigned int size) {
 }
 static void ot_supply_claimed(void *globals) {
     if (!globals) return;
-    write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 2, 1);
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 2, 1);
     struct ot_request request;
     struct ot_arm arm;
-    if (!ot_read_record(RUN "ot-supply.taken", &request, sizeof(request))) return;
-    if (rename_setting(RUN "ot-supply.arm", RUN "ot-supply.arm.taken") ||
-        !ot_read_record(RUN "ot-supply.arm.taken", &arm, sizeof(arm))) return;
+    if (!ot_read_record(OT_COMMAND "taken", &request, sizeof(request))) return;
+    if (rename_setting(OT_COMMAND "arm", OT_COMMAND "arm.taken") ||
+        !ot_read_record(OT_COMMAND "arm.taken", &arm, sizeof(arm))) return;
     if (attempt_pending()) return;
-    write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 3, 1);
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 3, 1);
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
     struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
                                   native_ot_heat_get, native_ot_supply_get, 0, 0);
 #else
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    struct ot_ack ack = ot_apply_managed(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
+                                  native_ot_heat_get, native_ot_supply_get, native_ot_supply_set);
+#else
     struct ot_ack ack = ot_apply_isolated_write(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
                                   native_ot_heat_get, native_ot_supply_get, native_ot_supply_set);
 #endif
-    write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 4, 1);
-    void *file = native_fopen(RUN "ot-supply.ack.tmp", "wb");
+#endif
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 4, 1);
+    void *file = native_fopen(OT_COMMAND "ack.tmp", "wb");
     if (!file) return;
     unsigned int n = native_fwrite(&ack, 1, sizeof(ack), file);
     if (native_fclose(file) == 0 && n == sizeof(ack))
-        rename_setting(RUN "ot-supply.ack.tmp", RUN "ot-supply.ack");
+        rename_setting(OT_COMMAND "ack.tmp", OT_COMMAND "ack");
 }
 /* The keeper claims the file, never touches native state.
  * queue_handler dispatches on nlclient's main thread. Mode 2 requires the
@@ -887,8 +905,8 @@ static int OT_EVENT_HANDLER(struct wake_handler *handler, void *event) {
     return RESULT_HANDLED;
 }
 static void OT_POLL(void *globals) {
-    if (!globals || rename_setting(RUN "ot-supply.request", RUN "ot-supply.taken")) return;
-    write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 1, 1);
+    if (!globals || rename_setting(OT_COMMAND "request", OT_COMMAND "taken")) return;
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 1, 1);
     queue_handler(globals, OT_EVENT_HANDLER);
 }
 #endif
@@ -1793,7 +1811,7 @@ void *custom_factory(void *globals, void *handler, const char *name) {
     PTR(PTR(screen, SCREEN_THIRD_THIS), SCREEN_THIRD_TITLE_SLOT) = title_thunk;
     title(screen);
     attempt_end();
-#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && (UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4)
     /* This is the same main-thread globals pointer supplied to the normal
      * keeper by a bucket commit or click. Start after successful factory
      * construction; keeper_start already prevents duplicate registration.
