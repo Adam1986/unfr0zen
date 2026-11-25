@@ -27,6 +27,8 @@ jobs:
         run: bash platform/common/nlclient/tests/opentherm-supply-abi.sh
       - name: Execute read-only native supply observer
         run: bash platform/common/nlclient/tests/opentherm-supply-probe.sh
+      - name: Test guarded supply handoff and ARM object modes
+        run: sh platform/common/nlclient/tests/test-ot-handoff.sh
       - name: Prepare Rust
         run: |
           rustup update stable
