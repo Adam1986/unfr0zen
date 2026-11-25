@@ -41,6 +41,14 @@ The new QEMU harness executes the reviewed leaf getter instructions against simu
 
 Next: validate the observer separately before deciding whether the existing commit hook can support a guarded, one-shot write mechanism. Keep the earlier registration candidate dormant, and do not enable writes or change Phoenix settings.
 
+## Checkpoint: low-limit heating incident and exact-image observer audit
+
+On 25 November 2026, the live Nest was in `BOILER_MODULATION / DRIFT / OFF` and logged `UnexpectedDrift` with active temperature 18.96°C, target 21.5°C and boiler setpoint 10°C. Its physical Pro Setup maximum supply temperature had been left at 20°C during earlier menu exploration. Changing only the physical setting to 50°C immediately restored heating. This is strong evidence of a low-limit operating issue, not evidence of a V6.6 software regression. The exact threshold and other operating limits are not established by this observation. Do not use the full native 0–100°C range as the writable entity's bounds or reset learned parameters. 50°C is the user's current working setting, not a universal recommended minimum.
+
+The standalone offline audit `platform/common/nlclient/tests/opentherm-supply-probe-audit.py` was executed against the supplied exact-hash installed image. It linked the 280-byte observer at the existing executable segment's end and changed only the in-memory device commit slot and two segment size words. The in-memory image SHA-256 was `1e949197385874f968a5fb1e90dfc6a2f3ff510c0c419ba381c7b122f7af12e1` using the local toolchain. Reverse edits restored the original image byte-for-byte; a one-byte modified input was refused. The audit does not save an executable or perform any installation. This separate path is not the production builder. The observer samples before the existing device commit and may be stale until another commit occurs.
+
+Before preparing a read-only device test, confirm the live executable's SHA-256 matches the reviewed image and confirm CI for the observer harness. If hashes differ, re-audit the actual live binary instead of applying the hardcoded offsets. No supply setter or writable MQTT endpoint is enabled.
+
 ## Remaining gates before a writable release
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
