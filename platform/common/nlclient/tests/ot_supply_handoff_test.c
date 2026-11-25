@@ -25,5 +25,39 @@ int main(void) {
     g.supply=DEG(20); assert(ot_apply(&a,&r,42,1000,&g,heat,get,set,1).status == OT_REJECTED); g.supply=DEG(50);
     assert(g.calls==0);
     g.ignore=1; assert(ot_apply(&a,&r,42,1000,&g,heat,get,set,1).status == OT_READBACK_MISMATCH && g.calls==1);
-    puts("OpenTherm handoff: all guard and mock setter assertions passed");
+    /* Mode 2 must never accept the earlier dry-run authorisation, or
+     * any other temperature transition, even if the envelope is valid. */
+    const struct ot_arm wa = {OT_WRITE_ARM_MAGIC, 42, 123, 1030, DEG(50), DEG(55)};
+    const struct ot_request wr = {OT_WRITE_REQ_MAGIC, 42, 123, 1020, DEG(55), DEG(50)};
+    g = (struct globals){1, DEG(55), 0, 0};
+#define WRITE(a,r,pid,now) ot_apply_isolated_write((a),(r),(pid),(now),&g,heat,get,set)
+    bad_a=wa; bad_a.magic=OT_ARM_MAGIC;
+    assert(WRITE(&bad_a,&wr,42,1000).status==OT_REJECTED);
+    bad_r=wr; bad_r.magic=OT_REQ_MAGIC;
+    assert(WRITE(&wa,&bad_r,42,1000).status==OT_REJECTED);
+    bad_a=wa; bad_a.lower=DEG(20);
+    assert(WRITE(&bad_a,&wr,42,1000).status==OT_REJECTED);
+    bad_r=wr; bad_r.target=DEG(51);
+    assert(WRITE(&wa,&bad_r,42,1000).status==OT_REJECTED);
+    bad_r=wr; bad_r.target=DEG(55); bad_r.expected=DEG(50);
+    assert(WRITE(&wa,&bad_r,42,1000).status==OT_REJECTED);
+    assert(WRITE(&wa,&wr,43,1000).status==OT_REJECTED);
+    assert(WRITE(&wa,&wr,42,1021).status==OT_REJECTED);
+    assert(WRITE(&wa,&wr,42,999).status==OT_REJECTED);
+    bad_r=wr; bad_r.token=124;
+    assert(WRITE(&wa,&bad_r,42,1000).status==OT_REJECTED);
+    g.heat=0;
+    assert(WRITE(&wa,&wr,42,1000).status==OT_REJECTED);
+    g.heat=1; g.supply=DEG(54);
+    assert(WRITE(&wa,&wr,42,1000).status==OT_REJECTED);
+    assert(g.calls==0);
+    g.supply=DEG(55);
+    struct ot_ack written=WRITE(&wa,&wr,42,1000);
+    assert(written.status==OT_SETTER_RETURNED && written.before==DEG(55)
+        && written.after==DEG(50) && g.calls==1);
+    assert(WRITE(&wa,&wr,42,1000).status==OT_REJECTED && g.calls==1);
+    g.supply=DEG(55); g.ignore=1;
+    written=WRITE(&wa,&wr,42,1000);
+    assert(written.status==OT_READBACK_MISMATCH && written.after==DEG(55) && g.calls==2);
+    puts("OpenTherm handoff: all guard, isolated-write and mock setter assertions passed");
 }
