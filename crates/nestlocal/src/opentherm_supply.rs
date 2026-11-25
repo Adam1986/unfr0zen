@@ -20,6 +20,11 @@ impl Limits {
     pub(crate) fn new(min: u32, max: u32) -> Option<Self> {
         (min > 0 && min < max && max <= 100).then_some(Self { min, max })
     }
+    // Match native mode 4's pilot ceiling; no default or automatic opt-in.
+    pub(crate) fn pilot(min: u32, max: u32) -> Option<Self> {
+        if min < 50 || max > 55 { return None; }
+        Self::new(min, max)
+    }
     pub(crate) fn parse_target(self, arg: &str) -> Option<u32> {
         let t = arg.trim().parse::<f64>().ok()?;
         if !t.is_finite() || t.fract() != 0.0 || t < self.min as f64 || t > self.max as f64 {
@@ -140,9 +145,15 @@ impl Transaction {
 // and fresh timestamp are necessary but not proof of main-thread execution.
 // Managed writes must use a different capability/mode value.
 pub(crate) fn auto_worker_ready(bytes: &[u8], generation: Generation, now: u32) -> bool {
+    worker_ready(bytes, generation, now, 3)
+}
+pub(crate) fn managed_worker_ready(bytes: &[u8], generation: Generation, now: u32) -> bool {
+    worker_ready(bytes, generation, now, 4)
+}
+fn worker_ready(bytes: &[u8], generation: Generation, now: u32, mode: u32) -> bool {
     if bytes.len() != 16 || generation.pid <= 1 || generation.start_ticks == 0 { return false; }
     let word = |i: usize| u32::from_le_bytes(bytes[i*4..i*4+4].try_into().unwrap());
-    word(0) == 0x31525457 && word(1) == generation.pid && word(3) == 3
+    word(0) == 0x31525457 && word(1) == generation.pid && word(3) == mode
         && word(2) != 0 && now.checked_sub(word(2)).is_some_and(|age| age <= 6)
 }
 
@@ -166,9 +177,18 @@ mod tests {
         let mut wrong_mode = record.clone();
         wrong_mode[12] = 2;
         assert!(!auto_worker_ready(&wrong_mode, GEN, 1002));
+        assert!(!managed_worker_ready(&record, GEN, 1002));
+        wrong_mode[12] = 4;
+        assert!(managed_worker_ready(&wrong_mode, GEN, 1002));
+        assert!(!auto_worker_ready(&wrong_mode, GEN, 1002));
+        assert!(!managed_worker_ready(&wrong_mode, GEN, 1007));
     }
     #[test]
     fn managed_bounds_and_records() {
+        assert!(Limits::pilot(49,55).is_none());
+        assert!(Limits::pilot(50,56).is_none());
+        assert!(Limits::pilot(55,55).is_none());
+        assert!(Limits::pilot(50,55).is_some());
         assert!(Limits::new(0,55).is_none());
         assert!(Limits::new(55,50).is_none());
         assert!(Limits::new(50,101).is_none());
