@@ -97,7 +97,9 @@ impl Transaction {
 
     /// Read-only observations. elapsed is monotonic since publication.
     /// Supply values are native 16.16 raw values, not object-store echoes.
-    /// A fresh independent telemetry sample must match persisted settings.
+    /// A correlated native getter ACK and persisted setting are two separate
+    /// observations. A later native UI event is optional corroboration, not
+    /// a requirement: the direct setter need not emit the UI event.
     /// No terminal outcome can be changed by later or duplicated evidence.
     pub(crate) fn observe(&mut self, generation: Option<Generation>, elapsed: Duration,
                           ack: Option<&[u8]>, saved: Option<u32>, telemetry: Option<u32>) -> Outcome {
@@ -129,11 +131,16 @@ impl Transaction {
         if self.outcome == Outcome::AwaitingPersistence {
             if elapsed.saturating_sub(self.ack_at.unwrap_or(elapsed)) > PERSIST_WAIT {
                 self.outcome = Outcome::Uncertain;
-            } else if saved == Some(self.target * FIXED) && telemetry == saved {
-                self.outcome = Outcome::Confirmed;
             } else if saved.is_some_and(|v| v != self.before * FIXED && v != self.target * FIXED)
-                || telemetry.is_some_and(|v| v != self.before * FIXED && v != self.target * FIXED) {
+                || telemetry.is_some_and(|v| v != self.target * FIXED) {
+                // A strictly later, contradictory UI event may be another
+                // local change. Do not release the lock on this evidence.
                 self.outcome = Outcome::Uncertain;
+            } else if saved == Some(self.target * FIXED) {
+                // Only reachable after the matching status-2 ACK has
+                // independently verified native before/after readback.
+                // This confirms the Nest setting, not a Heat Link ACK.
+                self.outcome = Outcome::Confirmed;
             }
         }
         self.outcome
@@ -320,7 +327,7 @@ impl Pilot {
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref(),
-            saved_raw(&self.settings),watch.pilot_event_since(active.issued as i64));
+            saved_raw(&self.settings),watch.pilot_event_since(i64::from(active.issued) + 1));
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::AwaitingPersistence => "awaiting_persistence",
@@ -328,6 +335,9 @@ impl Pilot {
             Outcome::Rejected => "rejected",
             Outcome::Uncertain => "review_required",
         };
+        if outcome == Outcome::Confirmed {
+            watch.note_managed_persisted(i64::from(active.issued));
+        }
         if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
                 if let Err(e) = fs::remove_file(self.dir.join(LOCK)) {
@@ -411,6 +421,25 @@ mod tests {
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&a),Some(55*FIXED),Some(50*FIXED)),Outcome::AwaitingPersistence);
         assert_eq!(t.observe(Some(GEN),secs(40),None,Some(55*FIXED),Some(50*FIXED)),Outcome::AwaitingPersistence);
         assert_eq!(t.observe(Some(GEN),secs(45),None,Some(50*FIXED),Some(50*FIXED)),Outcome::Confirmed);
+    }
+    #[test]
+    fn live_pilot_regression_missing_ui_event_is_not_failure() {
+        let mut t = trial();
+        let a = ack(2,55,50);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&a),Some(55*FIXED),None),Outcome::AwaitingPersistence);
+        assert_eq!(t.observe(Some(GEN),secs(10),None,Some(50*FIXED),None),Outcome::Confirmed);
+        assert_eq!(t.observe(Some(GEN),secs(150),None,Some(50*FIXED),None),Outcome::Confirmed);
+    }
+    #[test]
+    fn persistence_alone_and_conflicting_later_ui_event_never_confirm() {
+        let mut t = trial();
+        assert_eq!(t.observe(Some(GEN),secs(2),None,Some(50*FIXED),None),Outcome::AwaitingNative);
+        assert_eq!(t.observe(Some(GEN),secs(36),None,Some(50*FIXED),None),Outcome::Uncertain);
+        let mut t = trial();
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),Some(50*FIXED),Some(55*FIXED)),Outcome::Uncertain);
+        let mut t = trial();
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),Some(55*FIXED),None),Outcome::AwaitingPersistence);
+        assert_eq!(t.observe(Some(GEN),secs(123),None,Some(55*FIXED),None),Outcome::Uncertain);
     }
     #[test]
     fn stale_ack_and_restart_never_confirm() {
