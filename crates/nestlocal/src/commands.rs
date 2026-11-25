@@ -309,6 +309,15 @@ impl Bridge {
         let now = chrono::Utc::now().timestamp();
         if let Some(bucket) = name.strip_prefix("raw/") {
             return match unmarshal_object(arg.as_bytes()) {
+                // The experimental native supply-temperature path is not yet
+                // runtime validated. Reject raw writes as well as named writes;
+                // otherwise the generic bucket merge would bypass the gate.
+                Ok(Some(f)) if f.contains_key("boiler_supply_temperature")
+                    || f.contains_key("has_boiler_supply_temperature")
+                    || f.contains_key("opentherm_max_supply_temperature") =>
+                {
+                    Err("OpenTherm supply temperature writes are not enabled".into())
+                }
                 Ok(Some(f)) => Ok(Some((bucket.into(), f))),
                 Ok(None) => Ok(None),
                 Err(_) => Err("expected a JSON object".into()),
@@ -404,6 +413,10 @@ impl Bridge {
                 let hours = float(arg).filter(|h| (0.0..=5.0).contains(h) && h.fract() == 0.0)
                     .ok_or_else(|| "expected a whole number of hours, 0-5".to_string())?;
                 device(fields! {"max_nighttime_preconditioning_seconds" => (hours as u64 * 3600)})
+            }
+
+            "boiler_supply_temperature" | "opentherm_max_supply_temperature" => {
+                Err("OpenTherm supply temperature writes are not enabled".into())
             }
 
             "hot_water_temperature" => {
@@ -933,6 +946,36 @@ mod tests {
         assert_eq!(field("hot_water_schedule", "ON", "hot_water_mode"), json!("schedule"));
         assert_eq!(field("hot_water_schedule", "OFF", "hot_water_mode"), json!("off"));
         assert!(b.fields("hot_water_schedule", "maybe").is_err());
+    }
+
+    #[test]
+    fn experimental_supply_temperature_commands_fail_closed() {
+        let b = test_bridge();
+        b.store.merge("device.S", &fields! {
+            "heat_link_heat_type" => "opentherm",
+            "boiler_supply_temperature" => 60,
+            "has_boiler_supply_temperature" => true
+        }, 3, 100, true);
+        let before = b.store.get("device.S").unwrap();
+        let (mut changes, _sub) = b.store.subscribe();
+        for (name, arg) in [
+            ("boiler_supply_temperature", "55"),
+            ("opentherm_max_supply_temperature", "55"),
+            ("raw/device", r#"{"boiler_supply_temperature":55}"#),
+            ("raw/device", r#"{"has_boiler_supply_temperature":false}"#),
+            ("raw/device", r#"{"opentherm_max_supply_temperature":55}"#),
+            ("raw/device", r#"{"boiler_supply_temperature":55,"learning_mode":false}"#),
+            ("raw/phoenix", r#"{"boiler_supply_temperature":55}"#),
+        ] {
+            assert!(b.apply("mqtt", name, arg).is_err(), "{name} {arg}");
+        }
+        let after = b.store.get("device.S").unwrap();
+        assert_eq!(before.revision, after.revision);
+        assert_eq!(before.value, after.value);
+        assert!(changes.try_recv().is_err());
+        // Unrelated raw commands retain their existing behaviour.
+        b.apply("mqtt", "raw/device", r#"{"learning_mode":true}"#).unwrap();
+        assert_eq!(b.store.get("device.S").unwrap().value["learning_mode"], json!(true));
     }
 
     #[test]
