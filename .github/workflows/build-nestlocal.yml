@@ -6,6 +6,7 @@ on:
     branches:
       - feature/opentherm-support
       - feature/opentherm-support-v055
+      - feature/opentherm-supply-temperature
 
 permissions:
   contents: read
@@ -99,6 +100,13 @@ jobs:
           cargo test --locked -p nestlocal --bin nestlocal update::tests
           cargo test --locked -p nestlocal --bin nestlocal schedule
 
+      - name: Validate managed pilot command guards
+        if: github.ref_name == 'feature/opentherm-supply-temperature'
+        run: |
+          sh platform/common/nlclient/tests/test-ot-handoff.sh
+          cargo test --locked -p nestlocal --bin nestlocal experimental_supply_temperature_commands_fail_closed
+          cargo test --locked -p nestlocal --bin nestlocal opentherm_retained_commands_leave_weather_and_readback_intact
+
       - name: Build Nestlocal
         run: |
           cargo zigbuild \
@@ -124,6 +132,37 @@ jobs:
 
           sha256sum build/nestlocal-armv7 \
             > build/nestlocal-armv7.sha256
+
+      - name: Package matching managed native object and build metadata
+        if: github.ref_name == 'feature/opentherm-supply-temperature'
+        run: |
+          UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build/native
+          cp build/native/custom-screen.o build/managed-custom-screen.o
+          readelf -Ws build/managed-custom-screen.o > build/managed-native-symbols.txt
+          grep -q ot_managed_event build/managed-native-symbols.txt
+          grep -q native_ot_supply_set build/managed-native-symbols.txt
+          arm-linux-gnueabihf-readelf -l build/nestlocal-armv7 > build/nestlocal-program-headers.txt
+          arm-linux-gnueabihf-readelf -V build/nestlocal-armv7 > build/nestlocal-version-info.txt
+          git rev-parse HEAD > build/source-commit.txt
+          (cd build && sha256sum nestlocal-armv7 managed-custom-screen.o > pilot-sha256.txt)
+          # No stock firmware, patched firmware, installer, OTA or signing keys.
+          # This artifact alone does not enable the opt-in control.
+
+      - name: Upload matching managed pilot components
+        if: github.ref_name == 'feature/opentherm-supply-temperature'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentherm-managed-pilot-armv7
+          path: |
+            build/nestlocal-armv7
+            build/managed-custom-screen.o
+            build/managed-native-symbols.txt
+            build/nestlocal-program-headers.txt
+            build/nestlocal-version-info.txt
+            build/source-commit.txt
+            build/pilot-sha256.txt
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload Nestlocal artifact
         uses: actions/upload-artifact@v4
