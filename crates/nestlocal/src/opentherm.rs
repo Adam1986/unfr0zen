@@ -40,7 +40,7 @@ pub const CODES: [(&str, &str); 2] = [
 ];
 pub const TIMES: [(&str, &str); 2] = [
     ("opentherm_diagnostics_timestamp", "Boiler Diagnostics Last Measured"),
-    ("opentherm_control_timestamp", "CH Target Last Calculated"),
+    ("opentherm_control_timestamp", "Requested Supply Temperature Last Calculated"),
 ];
 
 // Only the Gen 3 platform and its event schema have been validated.

@@ -1235,7 +1235,7 @@ impl Bridge {
             }
             for (key, name) in crate::opentherm::TIMES {
                 let mut c = available(key);
-                c.extend(fields! {"value_template" => tmpl(key), "device_class" => "timestamp", "entity_category" => "diagnostic"});
+                c.extend(fields! {"value_template" => tmpl(key), "device_class" => "timestamp", "entity_category" => "diagnostic", "enabled_by_default" => false});
                 add("sensor", key, name, c);
             }
         }
@@ -1896,6 +1896,15 @@ pub mod tests {
         assert_eq!(flow_config["device"], config["device"]);
         let ch: Value = serde_json::from_str(&configs["homeassistant/binary_sensor/nestlocal_s/opentherm_ch_active/config"]).unwrap();
         assert_eq!(ch["enabled_by_default"], json!(false));
+        for (key, name) in [("opentherm_diagnostics_timestamp", "Boiler Diagnostics Last Measured"),
+            ("opentherm_control_timestamp", "Requested Supply Temperature Last Calculated")] {
+            let topic = format!("homeassistant/sensor/nestlocal_s/{key}/config");
+            let c: Value = serde_json::from_str(&configs[&topic]).unwrap();
+            assert_eq!(c["name"], json!(name));
+            assert_eq!(c["enabled_by_default"], json!(false));
+            assert_eq!(c["entity_category"], json!("diagnostic"));
+            assert_eq!(c["unique_id"], json!(format!("nestlocal_s_{key}")));
+        }
         assert!(!configs.contains_key("homeassistant/sensor/nestlocal_s/opentherm_dhw_primary_flow_temperature/config"));
         let config: Value = serde_json::from_str(&configs[max]).unwrap();
         assert!(config.get("command_topic").is_none());
