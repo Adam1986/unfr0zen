@@ -328,6 +328,9 @@ impl Pilot {
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref(),
             saved_raw(&self.settings),watch.pilot_event_since(i64::from(active.issued) + 1));
+        if outcome == Outcome::Confirmed {
+            watch.note_managed_persisted(i64::from(active.issued));
+        }
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::AwaitingPersistence => "awaiting_persistence",
@@ -335,9 +338,6 @@ impl Pilot {
             Outcome::Rejected => "rejected",
             Outcome::Uncertain => "review_required",
         };
-        if outcome == Outcome::Confirmed {
-            watch.note_managed_persisted(i64::from(active.issued));
-        }
         if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
                 if let Err(e) = fs::remove_file(self.dir.join(LOCK)) {
