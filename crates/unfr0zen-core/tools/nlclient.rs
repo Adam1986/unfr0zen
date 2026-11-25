@@ -30,7 +30,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let heat = has(b"\0native_ot_heat_get\0");
             let get = has(b"\0native_ot_supply_get\0");
             let set = has(b"\0native_ot_supply_set\0");
-            if (heat, get, set) != (mode != "normal", mode != "normal", mode == "isolated-write") {
+            let dry_event = has(b"\0ot_dry_event\0");
+            let write_event = has(b"\0ot_write_event\0");
+            if (heat, get, set, dry_event, write_event)
+                != (mode != "normal", mode != "normal", mode == "isolated-write",
+                    mode == "dry-run", mode == "isolated-write") {
                 return Err(format!("{mode}: unexpected experimental symbols").into());
             }
             let built = builder::build(&source, &object, sections)?;
@@ -115,10 +119,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
         return Ok(());
     }
-    let minimal = args.len() == 4 && args[0] == "--build-supply-dry-minimal";
+    let isolated_write = args.len() == 4 && args[0] == "--build-supply-write-minimal";
+    let minimal = isolated_write || (args.len() == 4 && args[0] == "--build-supply-dry-minimal");
     let inputs = if minimal { &args[1..] } else { &args[..] };
     if inputs.len() != 3 {
-        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE | --build-supply-dry-minimal STOCK OBJECT OUTPUT".into());
+        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE | --build-supply-dry-minimal STOCK OBJECT OUTPUT | --build-supply-write-minimal STOCK OBJECT OUTPUT".into());
     }
     let source = std::fs::read(&inputs[0])?;
     let object = std::fs::read(&inputs[1])?;
@@ -126,8 +131,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let has = |name: &[u8]| object.windows(name.len()).any(|w| w == name);
         if unfr0zen_core::shell::sha256_hex(&source) != "d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52"
             || !has(b"\0native_ot_heat_get\0") || !has(b"\0native_ot_supply_get\0")
-            || has(b"\0native_ot_supply_set\0") || !has(b"\0ot_dry_event\0") {
-            return Err("minimal audit build requires reviewed stock and the read-only event object".into());
+            || has(b"\0native_ot_supply_set\0") != isolated_write
+            || has(b"\0ot_dry_event\0") == isolated_write
+            || has(b"\0ot_write_event\0") != isolated_write {
+            return Err("minimal audit build requires reviewed stock and the matching event object".into());
         }
         &[]
     } else {
