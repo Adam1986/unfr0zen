@@ -9,6 +9,17 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror -I"$dir/../src" "$dir/ot_supply_handoff
 for mode in 0 1 2; do
     UNFR0ZEN_OT_SUPPLY_EXPERIMENT=$mode sh "$dir/../build.sh" "$tmp/$mode"
     readelf -Ws "$tmp/$mode/custom-screen.o" > "$tmp/$mode/symbols"
+    # The in-memory linker accepts only ABS32, REL32, CALL and JUMP24
+    # in the retained .text and .rodata sections; it discards EHABI.
+    readelf -Wr "$tmp/$mode/custom-screen.o" > "$tmp/$mode/relocs"
+    awk '
+        /^Relocation section/ {kept=($3 ~ /^\047\.rel\.(text|rodata)/)}
+        kept && $3 ~ /^R_ARM_/ && $3 !~ /^R_ARM_(ABS32|REL32|CALL|JUMP24)$/ {
+            print "Unsupported firmware relocation: " $0; bad=1
+        }
+        END {exit bad}
+    ' "$tmp/$mode/relocs"
+
 done
 if grep -q native_ot_ "$tmp/0/symbols"; then echo "normal build references experimental API" >&2; exit 1; fi
 grep -q native_ot_heat_get "$tmp/1/symbols"
