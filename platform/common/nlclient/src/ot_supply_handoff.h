@@ -47,4 +47,26 @@ static inline struct ot_ack ot_apply(const struct ot_arm *a, const struct ot_req
     }
     return ack;
 }
+
+/* Separate authorisation for the first supervised write trial only.
+ * Never accept a dry-run record as permission to write. These two settings
+ * have already been exercised via the physical menu on the reviewed unit.
+ * Do not treat this narrow trial interval as a general operating range. */
+#define OT_WRITE_ARM_MAGIC 0x3157544fu /* OTW1 */
+#define OT_WRITE_REQ_MAGIC 0x3153544fu /* OTS1 */
+static inline struct ot_ack ot_apply_isolated_write(const struct ot_arm *a, const struct ot_request *r,
+                                     uint32_t pid, uint32_t now, void *globals,
+                                     uint32_t (*heat)(void *), uint32_t (*get)(void *),
+                                     void (*set)(void *, uint32_t)) {
+    struct ot_ack rejected = {OT_ACK_MAGIC, pid, r->token, OT_REJECTED, 0, 0};
+    if (!set || a->magic != OT_WRITE_ARM_MAGIC || r->magic != OT_WRITE_REQ_MAGIC ||
+        a->lower != 50u * OT_FIXED || a->upper != 55u * OT_FIXED ||
+        r->expected != 55u * OT_FIXED || r->target != 50u * OT_FIXED)
+        return rejected;
+    struct ot_arm arm = *a;
+    struct ot_request request = *r;
+    arm.magic = OT_ARM_MAGIC;
+    request.magic = OT_REQ_MAGIC;
+    return ot_apply(&arm, &request, pid, now, globals, heat, get, set, 1);
+}
 #endif
