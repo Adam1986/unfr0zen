@@ -792,7 +792,48 @@ static int after_commit(void *bucket, int result) {
     downlink_activity(bucket);
     return result;
 }
-int custom_device_commit(void *bucket) { return after_commit(bucket, native_device_commit(bucket)); }
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
+#include "ot_supply_handoff.h"
+extern uint32_t native_ot_heat_get(void *);
+extern uint32_t native_ot_supply_get(void *);
+extern void native_ot_supply_set(void *, uint32_t);
+/* Existing client-thread device commit, not a new startup registration.
+ * Claim both files before touching native state. Never retry a taken request.
+ * The optional experimental object is accepted by the builder only for the
+ * exact reviewed stock ELF. No MQTT producer is enabled. */
+static int ot_read_record(const char *path, void *record, unsigned int size) {
+    void *file = native_fopen(path, "rb");
+    if (!file) return 0;
+    unsigned char extra;
+    unsigned int n = native_fread(record, 1, size, file);
+    unsigned int tail = native_fread(&extra, 1, 1, file);
+    return native_fclose(file) == 0 && n == size && tail == 0;
+}
+static void ot_supply_handoff(void *globals) {
+    if (!globals || rename_setting(RUN "ot-supply.request", RUN "ot-supply.taken")) return;
+    struct ot_request request;
+    struct ot_arm arm;
+    if (!ot_read_record(RUN "ot-supply.taken", &request, sizeof(request))) return;
+    if (rename_setting(RUN "ot-supply.arm", RUN "ot-supply.arm.taken") ||
+        !ot_read_record(RUN "ot-supply.arm.taken", &arm, sizeof(arm))) return;
+    if (attempt_pending()) return;
+    struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
+                                  native_ot_heat_get, native_ot_supply_get, native_ot_supply_set,
+                                  UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 2);
+    void *file = native_fopen(RUN "ot-supply.ack.tmp", "wb");
+    if (!file) return;
+    unsigned int n = native_fwrite(&ack, 1, sizeof(ack), file);
+    if (native_fclose(file) == 0 && n == sizeof(ack))
+        rename_setting(RUN "ot-supply.ack.tmp", RUN "ot-supply.ack");
+}
+#endif
+int custom_device_commit(void *bucket) {
+    int result = after_commit(bucket, native_device_commit(bucket));
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
+    ot_supply_handoff(PTR(bucket, BUCKET_GLOBALS_OFFSET));
+#endif
+    return result;
+}
 int custom_shared_commit(void *bucket) { return after_commit(bucket, native_shared_commit(bucket)); }
 int custom_schedule_commit(void *bucket) { return after_commit(bucket, native_schedule_commit(bucket)); }
 
