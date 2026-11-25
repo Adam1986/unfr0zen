@@ -25,6 +25,8 @@ jobs:
         run: sudo apt-get install -y qemu-user lld
       - name: Execute mock native ARM ABI tests
         run: bash platform/common/nlclient/tests/opentherm-supply-abi.sh
+      - name: Execute read-only native supply observer
+        run: bash platform/common/nlclient/tests/opentherm-supply-probe.sh
       - name: Prepare Rust
         run: |
           rustup update stable
