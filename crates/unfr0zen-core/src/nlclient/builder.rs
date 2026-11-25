@@ -59,6 +59,29 @@ pub fn build(source: &[u8], object: &[u8], sections: &[super::menu::Section]) ->
     ]);
     externals.extend(menu_bindings.clone());
     externals.entry("native_rename".into()).or_insert(0);
+    // Only explicitly compiled experimental objects reference these symbols.
+    // Never guess addresses on another stock image or alter ordinary builds.
+    let payload_elf = Elf::parse(object)?;
+    let symbol_table = payload_elf.section(".symtab")?;
+    let strings = payload_elf.sections.get(symbol_table.link)
+        .ok_or_else(|| crate::Error::Device("invalid payload symbol strings".into()))?;
+    let experiment = payload_elf.contents(strings).windows(b"\0native_ot_heat_get\0".len())
+        .any(|s| s == b"\0native_ot_heat_get\0");
+    if experiment {
+        if discovery.stock_sha256 != "d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52"
+            || elf.read(0xa73ac)? != 0xe2800a01 || elf.read(0xa73b0)? != 0xe5900640
+            || elf.read(0xa73e8)? != 0xe2800a01 || elf.read(0xa73ec)? != 0xe5900654
+            || elf.read(0xbaab8)? != 0xe92d4070 || elf.read(0xbaadc)? != 0xe5851654
+            || discovery.layout.get("BUCKET_GLOBALS_OFFSET") != Some(&28)
+        {
+            return device("experimental OpenTherm handoff requires the exact reviewed 6.4-8 stock ELF");
+        }
+        externals.extend([
+            ("native_ot_heat_get".into(), 0xa73ac),
+            ("native_ot_supply_get".into(), 0xa73e8),
+            ("native_ot_supply_set".into(), 0xbaab8),
+        ]);
+    }
     let handover = discovery::handover(&discovery);
     externals.extend(discovery::handover_externals(&discovery));
     let fb = discovery.framebuffer.as_ref().filter(|_| handover == 2);
