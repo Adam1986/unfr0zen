@@ -639,6 +639,20 @@ u32 custom_swap(void *display, void *surface) {
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
 #define OT_EVENT_HANDLER ot_dry_event
 #define OT_POLL ot_poll_dry
+#elif UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+#define OT_EVENT_HANDLER ot_auto_event
+#define OT_POLL ot_poll_auto
+/* A live worker heartbeat, not a native command acknowledgement. The
+ * record is atomically replaced in tmpfs; never interpret keeper.pid
+ * alone as proof that the thread was created successfully. */
+static void ot_worker_ready(void) {
+    u32 record[4] = {0x31525457u, (u32)native_getpid(), native_time(0), 3};
+    void *file = native_fopen(RUN "ot-supply.ready.tmp", "wb");
+    if (!file) return;
+    unsigned int n = native_fwrite(record, 1, sizeof(record), file);
+    if (native_fclose(file) == 0 && n == sizeof(record))
+        rename_setting(RUN "ot-supply.ready.tmp", RUN "ot-supply.ready");
+}
 #else
 #define OT_EVENT_HANDLER ot_write_event
 #define OT_POLL ot_poll_write
@@ -649,7 +663,18 @@ static void *keeper(void *globals) {
     for (;;) {
         native_usleep(KEEPER_PERIOD * 1000000);
 #if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+        /* Factory startup can precede full client/queue initialisation.
+         * Wait until the existing accessor confirms ownership and the
+         * native screen guard is clear. No native heating state is read
+         * here, nor is a setter linked into mode 3. */
+        if (!attempt_pending() && stock_client(globals)) {
+            ot_worker_ready();
+            OT_POLL(globals);
+        }
+#else
         OT_POLL(globals);
+#endif
 #endif
         if (screen_owned())
             wake_display(globals);
@@ -672,7 +697,12 @@ static void keeper_start(void *globals) {
     if (HANDOVER != HANDOVER_SWAP || read_pid(KEEPER) != pid)
         return;
     unsigned int thread;
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+    if (native_pthread_create(&thread, 0, keeper, globals))
+        rename_setting(KEEPER, RUN "keeper.failed");
+#else
     native_pthread_create(&thread, 0, keeper, globals);
+#endif
 }
 /* The gen 1's and gen 2's flip (HANDOVER_FLIP). nlclient draws straight into its mapping
  * of fb0's two pages, so while the display is owned that mapping is
@@ -832,7 +862,7 @@ static void ot_supply_claimed(void *globals) {
         !ot_read_record(RUN "ot-supply.arm.taken", &arm, sizeof(arm))) return;
     if (attempt_pending()) return;
     write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 3, 1);
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
     struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
                                   native_ot_heat_get, native_ot_supply_get, 0, 0);
 #else
@@ -1763,5 +1793,13 @@ void *custom_factory(void *globals, void *handler, const char *name) {
     PTR(PTR(screen, SCREEN_THIRD_THIS), SCREEN_THIRD_TITLE_SLOT) = title_thunk;
     title(screen);
     attempt_end();
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
+    /* This is the same main-thread globals pointer supplied to the normal
+     * keeper by a bucket commit or click. Start after successful factory
+     * construction; keeper_start already prevents duplicate registration.
+     * The original commit/click paths remain as fallbacks if the runtime
+     * directory does not yet exist. */
+    keeper_start(globals);
+#endif
     return screen;
 }
