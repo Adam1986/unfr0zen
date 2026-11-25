@@ -31,7 +31,9 @@ static inline int ot_envelope(const struct ot_arm *a, const struct ot_request *r
 }
 /* Both the arm and request must already have been claimed before calling.
  * A successful return is only an in-memory observation, NOT a boiler ACK. */
-static inline struct ot_ack ot_apply(const struct ot_arm *a, const struct ot_request *r,
+/* Keep native function references as direct ARM CALL relocations. The
+ * in-memory firmware linker has no GOT and must not receive GOT_PREL. */
+static inline __attribute__((always_inline)) struct ot_ack ot_apply(const struct ot_arm *a, const struct ot_request *r,
                                      uint32_t pid, uint32_t now, void *globals,
                                      uint32_t (*heat)(void *), uint32_t (*get)(void *),
                                      void (*set)(void *, uint32_t), int writes) {
@@ -54,7 +56,7 @@ static inline struct ot_ack ot_apply(const struct ot_arm *a, const struct ot_req
  * Do not treat this narrow trial interval as a general operating range. */
 #define OT_WRITE_ARM_MAGIC 0x3157544fu /* OTW1 */
 #define OT_WRITE_REQ_MAGIC 0x3153544fu /* OTS1 */
-static inline struct ot_ack ot_apply_isolated_write(const struct ot_arm *a, const struct ot_request *r,
+static inline __attribute__((always_inline)) struct ot_ack ot_apply_isolated_write(const struct ot_arm *a, const struct ot_request *r,
                                      uint32_t pid, uint32_t now, void *globals,
                                      uint32_t (*heat)(void *), uint32_t (*get)(void *),
                                      void (*set)(void *, uint32_t)) {
