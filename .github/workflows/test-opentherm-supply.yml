@@ -21,6 +21,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config clang
+      - name: Install ARM emulator and linker
+        run: sudo apt-get install -y qemu-user lld
+      - name: Execute mock native ARM ABI tests
+        run: bash platform/common/nlclient/tests/opentherm-supply-abi.sh
       - name: Prepare Rust
         run: |
           rustup update stable
