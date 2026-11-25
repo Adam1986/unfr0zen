@@ -49,6 +49,14 @@ The standalone offline audit `platform/common/nlclient/tests/opentherm-supply-pr
 
 Before preparing a read-only device test, confirm the live executable's SHA-256 matches the reviewed image and confirm CI for the observer harness. If hashes differ, re-audit the actual live binary instead of applying the hardcoded offsets. No supply setter or writable MQTT endpoint is enabled.
 
+## Live observer test: failed startup, original restored (25 November 2026)
+
+The installed v0.5.5 hash and candidate hash matched the offline audit. The temporary bind-mounted observer failed to complete startup. The activation script's three-second process check incorrectly reported success; subsequent startup attempts logged "client: failed to CreateScreens()" and "MAIN: failed to initialize client globals". Monit logged five restarts within nine cycles and invoked client_recovery at 14:51:31. The reboot removed the temporary bind mount and restored the original executable hash. Native supply stayed at 50°C. No observer record was obtained. Do not re-use the failed activation script.
+
+The equipment-screen and appsetup PNG warnings also occur in successful original V6.6 startup and are not diagnostic of this failure. Offline analysis traced the CreateScreens error to the nonzero return from 0x90e3c (call at 0x99cf0), a layer/screen factory loop returning -1 if a factory returns null. The stock screen registration table starts at 0x6f5568; the installed V6.6 account factory at 0x213b14 branches to custom_factory at 0x84122c. The existing custom_factory opens /var/run/unfr0zen-screen.attempt and returns null if present; this is verified in both the exact installed binary and the V6.6 source. The existing guard is also used on screen entry and first draw. A stale marker could therefore cause a restart loop even before the new device commit observer executes. Its presence during the failure is not established; a reboot clears /var/run. Other factory initialization failures and differences between warm restart and cold boot remain possible.
+
+The observer must remain uninstalled. Investigate the existing factory guard and startup diagnostics offline before any further device experiment. A future device test would require a genuinely completed startup check, immediate rollback on loss of the original PID or initialization failure, a separate test environment where possible, and preservation of Monit/watchdog recovery. Do not remove or bypass the fault guard as a workaround. The previous mocked QEMU tests and successful static audit do not prove live compatibility.
+
 ## Remaining gates before a writable release
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
