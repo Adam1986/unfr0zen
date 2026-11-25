@@ -120,10 +120,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let isolated_write = args.len() == 4 && args[0] == "--build-supply-write-minimal";
-    let minimal = isolated_write || (args.len() == 4 && args[0] == "--build-supply-dry-minimal");
+    let auto_start = args.len() == 4 && args[0] == "--build-supply-auto-minimal";
+    let minimal = isolated_write || auto_start || (args.len() == 4 && args[0] == "--build-supply-dry-minimal");
     let inputs = if minimal { &args[1..] } else { &args[..] };
     if inputs.len() != 3 {
-        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE | --build-supply-dry-minimal STOCK OBJECT OUTPUT | --build-supply-write-minimal STOCK OBJECT OUTPUT".into());
+        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE | --build-supply-dry-minimal STOCK OBJECT OUTPUT | --build-supply-write-minimal STOCK OBJECT OUTPUT | --build-supply-auto-minimal STOCK OBJECT OUTPUT".into());
     }
     let source = std::fs::read(&inputs[0])?;
     let object = std::fs::read(&inputs[1])?;
@@ -132,8 +133,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if unfr0zen_core::shell::sha256_hex(&source) != "d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52"
             || !has(b"\0native_ot_heat_get\0") || !has(b"\0native_ot_supply_get\0")
             || has(b"\0native_ot_supply_set\0") != isolated_write
-            || has(b"\0ot_dry_event\0") == isolated_write
-            || has(b"\0ot_write_event\0") != isolated_write {
+            || has(b"\0ot_dry_event\0") != (!isolated_write && !auto_start)
+            || has(b"\0ot_write_event\0") != isolated_write
+            || has(b"\0ot_auto_event\0") != auto_start {
             return Err("minimal audit build requires reviewed stock and the matching event object".into());
         }
         &[]
