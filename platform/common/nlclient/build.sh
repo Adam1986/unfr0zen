@@ -11,9 +11,14 @@ set -eu
 }
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$1"
+# Explicit offline experiment; ordinary/release builds remain unchanged.
+ot_mode=${UNFR0ZEN_OT_SUPPLY_EXPERIMENT:-0}
+case "$ot_mode" in 0|1|2) ;; *) echo "invalid experimental OpenTherm mode" >&2; exit 2 ;; esac
 for name in custom_screen rcs_screen; do
     case "$name" in custom_screen) output=custom-screen.o ;; rcs_screen) output=j49-rcs-screen.o ;; esac
-    clang --target=arm-linux-gnueabihf -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard \
+    experiment=0
+    [ "$name" != custom_screen ] || experiment=$ot_mode
+    clang -DUNFR0ZEN_OT_SUPPLY_EXPERIMENT="$experiment" --target=arm-linux-gnueabihf -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard \
         -std=c11 -O2 -fPIE -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables \
         -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -c "$dir/src/$name.c" -o "$1/$output"
 done
