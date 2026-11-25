@@ -41,7 +41,7 @@ fn engine() -> &'static str {
 const VERSION_FILE: &str = "/etc/unfr0zen/version";
 // This development binary is installed separately from the official OTA bundle.
 // Keep upstream release checks, but do not let an OTA replace this build.
-const DEVELOPMENT_BUILD: &str = "OpenTherm V6.4";
+const DEVELOPMENT_BUILD: &str = "OpenTherm V6.5";
 /// The latest release, as GitHub's API describes it.
 pub const RELEASES: &str = "https://api.github.com/repos/unfr0zen/unfr0zen/releases/latest";
 /// Where a downloaded bundle waits for the engine, written as it arrives: on

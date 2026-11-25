@@ -140,6 +140,7 @@ struct Sample {
 struct Samples {
     diagnostics: Option<Sample>,
     control: Option<Sample>,
+    supply_setting: Option<(i64, Value)>,
     combined_seen: bool,
     dhw_seen: bool,
 }
@@ -207,8 +208,61 @@ fn parse(line: &str) -> Option<(bool, Sample)> {
     }
 }
 
+// The native Pro Setup setter records this event with one decimal Celsius
+// value. Unlike a requested supply temperature, this is the configured limit.
+fn supply_setting_event(line: &str) -> Option<(i64, Value)> {
+    let mut words = line.split_whitespace();
+    let logged = words.next()?;
+    if words.next()? != "BoilerSupplySetTemp" { return None; }
+    let t = chrono::NaiveDateTime::parse_from_str(logged, "%Y-%m-%dT%H:%M:%S").ok()?.and_utc().timestamp();
+    let v = words.next()?.parse::<f64>().ok()?;
+    if words.next().is_some() || !(0.0 < v && v <= 100.0) { return None; }
+    Some((t, num((v * 1000.0).round() / 1000.0)))
+}
+
+// Reject saved events from before the current nlclient process. The proc
+// start time is field 22, in clock ticks since boot (not wall-clock time).
+fn process_start(stat: &str, boot: i64, ticks: i64) -> Option<i64> {
+    if boot <= 0 || ticks <= 0 { return None; }
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse::<i64>().ok()?;
+    if start < 0 { return None; }
+    // Round up to avoid attributing a preceding process's same-second event.
+    boot.checked_add(start.checked_add(ticks - 1)? / ticks)
+}
+
+fn nlclient_start() -> Option<i64> {
+    let boot = std::fs::read_to_string("/proc/stat").ok()?.lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<i64>().ok())?;
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as i64;
+    let mut started = None;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() { continue; }
+        let proc = entry.path();
+        if std::fs::read_link(proc.join("exe")).ok().as_deref() != Some(Path::new("/nestlabs/sbin/nlclient")) { continue; }
+        let stat = std::fs::read_to_string(proc.join("stat")).ok()?;
+        let candidate = process_start(&stat, boot, ticks)?;
+        if started.is_some() { return None; }
+        started = Some(candidate);
+    }
+    started
+}
+
 impl Samples {
+    fn supply_maximum(&self, now: i64, started: Option<i64>, saved: Value) -> Value {
+        match (&self.supply_setting, started) {
+            (Some((t, v)), Some(start)) if *t >= start && *t <= now => v.clone(),
+            _ => saved,
+        }
+    }
+
     fn line(&mut self, line: &str, now: i64) {
+        if let Some((t, v)) = supply_setting_event(line) {
+            if t <= now.saturating_add(FUTURE_TOLERANCE)
+                && self.supply_setting.as_ref().is_none_or(|(old, _)| t >= *old || *old > now.saturating_add(FUTURE_TOLERANCE)) {
+                self.supply_setting = Some((t, v));
+            }
+            return;
+        }
         let Some((diag, sample)) = parse(line) else { return; };
         // Ignore records implausibly far in the future, including after a
         // clock adjustment. Accept equal timestamps (control recalculations
@@ -309,7 +363,8 @@ pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl 
                 }
                 let combined_new = samples.combined_seen && !state.combined_seen.swap(true, Ordering::Relaxed);
                 let dhw_new = samples.dhw_seen && !state.dhw_seen.swap(true, Ordering::Relaxed);
-                let updated = state.update(samples.shown(now, maximum(&config)));
+                let limit = samples.supply_maximum(now, nlclient_start(), maximum(&config));
+                let updated = state.update(samples.shown(now, limit));
                 if updated || combined_new || dhw_new { changed(); }
             } else {
                 reader = None;
@@ -436,6 +491,26 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         assert!(!reader.current(&path));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supply_setting_uses_current_session_event_and_saved_fallback() {
+        let mut samples = Samples::default();
+        let saved = json!(55);
+        assert_eq!(samples.supply_maximum(T, Some(T-60), saved.clone()), saved);
+        samples.line("2026-01-01T00:00:00 BoilerSupplySetTemp 50.000", T);
+        assert_eq!(samples.supply_maximum(T, Some(T-60), saved.clone()), json!(50));
+        assert_eq!(samples.supply_maximum(T+7200, Some(T-60), saved.clone()), json!(50));
+        assert_eq!(samples.supply_maximum(T+60, Some(T+30), saved.clone()), saved);
+        assert_eq!(samples.supply_maximum(T, None, saved.clone()), saved);
+        assert_eq!(samples.supply_maximum(T-1, Some(T-60), saved.clone()), saved);
+        samples.line("2026-01-01T00:00:01 BoilerSupplySetTemp 55.000", T+1);
+        assert_eq!(samples.supply_maximum(T+1, Some(T-60), json!(50)), json!(55));
+        for bad in ["NaN", "0", "-1", "101", "50 extra"] {
+            assert!(supply_setting_event(&format!("2026-01-01T00:00:00 BoilerSupplySetTemp {bad}")).is_none());
+        }
+        let stat = format!("123 (nlclient) S {} 12345", vec!["0";18].join(" "));
+        assert_eq!(process_start(&stat, 1000, 100), Some(1124));
     }
 
     #[test]
