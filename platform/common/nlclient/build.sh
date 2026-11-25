@@ -13,7 +13,7 @@ dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$1"
 # Explicit offline experiment; ordinary/release builds remain unchanged.
 ot_mode=${UNFR0ZEN_OT_SUPPLY_EXPERIMENT:-0}
-case "$ot_mode" in 0|1|2) ;; *) echo "invalid experimental OpenTherm mode" >&2; exit 2 ;; esac
+case "$ot_mode" in 0|1|2|3) ;; *) echo "invalid experimental OpenTherm mode" >&2; exit 2 ;; esac
 for name in custom_screen rcs_screen; do
     case "$name" in custom_screen) output=custom-screen.o ;; rcs_screen) output=j49-rcs-screen.o ;; esac
     experiment=0
