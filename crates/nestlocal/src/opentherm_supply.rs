@@ -1,6 +1,5 @@
-//! Managed supply-temperature command lifecycle, independent of MQTT and IO.
-//! Not connected to a live write path yet. V5 is the supervised one-way
-//! trial; a future managed native mode must explicitly accept its own ABI.
+//! Managed supply-temperature lifecycle and explicitly opted-in pilot IO.
+//! Mode 4 is required; older experimental binaries cannot accept this ABI.
 //! Never turn a native setter return into an optimistic bucket update.
 use std::time::Duration;
 
@@ -255,6 +254,7 @@ impl Pilot {
     }
     pub(crate) fn limits(&self) -> (u32,u32) { (self.limits.min,self.limits.max) }
     pub(crate) fn discovered(&self) -> bool { self.seen.load(Ordering::Relaxed) }
+    pub(crate) fn active(&self) -> bool { self.run.lock().unwrap().active.is_some() }
     fn worker(&self, t: u32) -> Option<Generation> {
         if read_limits(Path::new(OPT_IN)) != Some(self.limits) { return None; }
         if exists(Path::new("/var/run/unfr0zen-screen.attempt")) { return None; }
@@ -295,6 +295,8 @@ impl Pilot {
         let mut random = [0u8;4];
         fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random)).map_err(|e| e.to_string())?;
         let token = u32::from_le_bytes(random);
+        if fs::read(self.dir.join(ACK)).ok().and_then(|b| decode(&b))
+            .is_some_and(|a| a[2] == token) { return Err("token collision; no command published".into()); }
         let tx = Transaction::new(g,token,t,self.limits,before,target).ok_or("invalid transaction")?;
         let (arm,request) = tx.records();
         // The exclusive marker is established before either record. Even
@@ -348,6 +350,16 @@ mod tests {
         encode([ACK_MAGIC, 42, 77, status, before * FIXED, after * FIXED])
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
+    #[test]
+    fn pilot_publication_never_overwrites_a_pending_record() {
+        let dir = std::env::temp_dir().join(format!("ot-pilot-{}-{:?}",std::process::id(),std::thread::current().id()));
+        fs::create_dir(&dir).unwrap();
+        publish_once(&dir, ARM, b"first").unwrap();
+        assert!(publish_once(&dir, ARM, b"second").is_err());
+        assert_eq!(fs::read(dir.join(ARM)).unwrap(),b"first");
+        assert!(!dir.join(format!("{ARM}.partial")).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn pilot_opt_in_parser_has_no_default() {
         assert_eq!(parse_limits("50 55"),Limits::pilot(50,55));
