@@ -20,7 +20,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if sha != "d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52" {
             return Err("audit requires the reviewed stock firmware (not a patched executable)".into());
         }
-        let sections = &unfr0zen_core::nlclient::menu::Section::ALL;
+        // Match the reviewed physical thermostat: no optional Zigbee, Matter,
+        // Themes or Doom sections. Do not use the all-feature golden profile.
+        let sections: &[unfr0zen_core::nlclient::menu::Section] = &[];
         let mut reports = Vec::new();
         for (mode, arg) in ["normal", "dry-run", "isolated-write"].into_iter().zip(&args[2..]) {
             let object = std::fs::read(arg)?;
@@ -113,13 +115,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
         return Ok(());
     }
-    if args.len() != 3 {
-        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE".into());
+    let minimal = args.len() == 4 && args[0] == "--build-supply-dry-minimal";
+    let inputs = if minimal { &args[1..] } else { &args[..] };
+    if inputs.len() != 3 {
+        return Err("usage: nlclient STOCK OBJECT OUTPUT | --report STOCK | --golden STOCK OBJECT TOOLCHAIN | --audit-supply STOCK NORMAL DRY WRITE | --build-supply-dry-minimal STOCK OBJECT OUTPUT".into());
     }
-    let source = std::fs::read(&args[0])?;
-    let object = std::fs::read(&args[1])?;
-    let found = builder::build(&source, &object, &unfr0zen_core::nlclient::menu::Section::ALL)?;
-    let out = PathBuf::from(&args[2]);
+    let source = std::fs::read(&inputs[0])?;
+    let object = std::fs::read(&inputs[1])?;
+    let sections: &[unfr0zen_core::nlclient::menu::Section] = if minimal {
+        let has = |name: &[u8]| object.windows(name.len()).any(|w| w == name);
+        if unfr0zen_core::shell::sha256_hex(&source) != "d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52"
+            || !has(b"\0native_ot_heat_get\0") || !has(b"\0native_ot_supply_get\0")
+            || has(b"\0native_ot_supply_set\0") || !has(b"\0ot_dry_event\0") {
+            return Err("minimal audit build requires reviewed stock and the read-only event object".into());
+        }
+        &[]
+    } else {
+        &unfr0zen_core::nlclient::menu::Section::ALL
+    };
+    let found = builder::build(&source, &object, sections)?;
+    if minimal {
+        let names = found.manifest["settings_menu"]["names"].as_array().ok_or("missing menu manifest")?;
+        if names.iter().any(|name| matches!(name.as_str(), Some("account" | "update" | "proinfoscreen" | "templock"))) {
+            return Err("unexpected optional menu entry in minimal audit build".into());
+        }
+        let patch = Patch::parse(&found.journal)?;
+        if patch.apply(&source, false)? != found.output || patch.apply(&found.output, true)? != source {
+            return Err("minimal audit build failed rollback verification".into());
+        }
+    }
+    let out = PathBuf::from(&inputs[2]);
     std::fs::write(&out, &found.output)?;
     std::fs::write(out.with_extension("json"), serde_json::to_vec_pretty(&found.manifest)?)?;
     std::fs::write(out.with_extension("undo.gz"), &found.journal)?;
