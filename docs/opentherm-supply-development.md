@@ -72,3 +72,50 @@ The original screen fault marker is not proof of the earlier cause. Preserve it 
 5. Exercise native and Rust regressions, prove rollback and test isolated from the live boiler before controlled testing.
 
 No firmware binary, Home Assistant number discovery, or write enablement is included in this branch checkpoint.
+
+
+## Live V4 dry-run and V5 supervised write — 25 November 2026
+
+The V4 candidate used the existing keeper's native main-thread event queue,
+with the thermostat's original minimal menu profile. The user opened
+UNFR0ZEN once after a warm restart to initialise the keeper. Native ACK
+status 1 reported 3604480 (55°C) both before and after, for a requested
+50°C. No setter was linked into V4. V6.6 was restored successfully.
+
+V5 (build at `aae6af82609e27b5df33b1c03790e697a318aca7`, candidate SHA-256
+`f30451a6e4607b16ab03ded57da3f40a3a402f26ee3e94348e7c48f1c6aedfa3`)
+used the same event queue with distinct one-shot write authorisation,
+restricted to 55°C → 50°C. Heating was idle. Observed:
+
+- Native ACK status 2: 3604480 → 3276800 (55°C → 50°C).
+- 19:17:06: Heat Link UpdateRequest, profile 235a000c, tag 16, value 500.
+- 19:17:09: Boiler_Setup_Status=1, txn=3. This supports communication
+  but is not a transaction-correlated acknowledgement of tag 16.
+- The initial persistence check still read 3604480; before original
+  restart and after restart the saved value was 3276800.
+- V6.6 restoration verified original executable hash, running PID and
+  Monit. The user confirmed Home Assistant showed 50°C and then restored
+  55°C themselves.
+
+The trial's early persistence timeout was therefore inconclusive at that
+instant, not proof of a failed setter. Do not retry the write automatically.
+The old observer and registration experiments remain abandoned. The successful
+native mechanism is the existing keeper/event queue, not those earlier hooks.
+
+### Managed implementation requirements
+
+Preserve the existing read-only sensor, add a separate non-optimistic MQTT
+number only when capability, explicit installation limits and a live native
+worker are all established. Keep raw supply writes and retained commands
+blocked. Validate command PID/generation, token, bounds, whole degrees and
+expected native value; serialise commands. Track native setter return
+separately from saved settings and published telemetry; allow delayed
+persistence. Timeout or contradictory evidence must be reported as uncertain,
+not silently retried or reversed. Never write settings.config directly.
+Do not use the representation limit of 100°C as an operating range.
+
+Cold boot and warm restart readiness must be verified independently; the
+keeper PID file alone does not prove that pthread creation succeeded. A live
+heartbeat is preferable. No release, broad temperature range, or unattended
+write has yet been validated. Preserve the stable V6.6 branch and native
+screen/watchdog guards.
