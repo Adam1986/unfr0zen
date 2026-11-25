@@ -27,6 +27,20 @@ Named supply writes and raw writes containing the supply property, capability pr
 - Builder tests now exercise the append and rollback primitive with a synthetic ELF fixture using the actual Rust Patch implementation. The helper is test-only and does not alter the production build.
 - Native property construction includes C++ cleanup paths; the stock ARM exception index ends at 0x5ab824 (cantunwind), below the appended code. Do not activate the registration hook until unwind coverage, ownership, insertion failure and duplicate-registration semantics are addressed.
 
+## Checkpoint: recovered stock and simpler observer path
+
+The user reports CI for `1fc87cd` passed, including the QEMU mock registration/guard harness and Rust rollback tests.
+
+Recovered the actual stock executable from the earlier 6.4-8 backup by reversing its UFP1 journal. Both backup output hash and restored stock hash were verified. The restored stock SHA-256 is `d28f3e8ec232c4ef122f72ceb1028ddf480a0ad8454677bfc9e818a13cbb7c52` (7262084 bytes), matching the reviewed 2025 golden variant. The supplied installed v0.5.5 binary is different from the earlier backup output, but nine relevant native code/string ranges are byte-identical between recovered stock and v0.5.5. No proprietary binary is committed.
+
+A simpler candidate uses the existing unfr0zen device-commit hook rather than adding a new C++ property. The reviewed bucket globals pointer is at offset 28; native getters read globals+5696 (heating type) and +5716 (supply temperature). The v0.5.5 commit slot at virtual 0x6c7270 has an R_ARM_RELATIVE relocation and currently points to 0x840550.
+
+`opentherm-supply-probe.S` is a read-only candidate, linked offline without unresolved relocations against the exact v0.5.5 addresses. It restores its frame before tail-branching to the previous commit hook; no C++ property allocation or supply setter is called. It would publish a separate atomic diagnostic record containing magic, PID, native configuration and raw 16.16 value. It is NOT installed, connected to production builder or consumed by nestlocal. The record can be stale; it must not be treated as a command acknowledgement.
+
+The new QEMU harness executes the reviewed leaf getter instructions against simulated globals and checks read-only behaviour, file IO failures and original commit return. Actual C++ globals lifetime, thread context, real filesystem behaviour and physical readback are not established by mocks.
+
+Next: validate the observer separately before deciding whether the existing commit hook can support a guarded, one-shot write mechanism. Keep the earlier registration candidate dormant, and do not enable writes or change Phoenix settings.
+
 ## Remaining gates before a writable release
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
