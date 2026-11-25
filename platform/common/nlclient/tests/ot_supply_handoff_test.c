@@ -59,5 +59,27 @@ int main(void) {
     g.supply=DEG(55); g.ignore=1;
     written=WRITE(&wa,&wr,42,1000);
     assert(written.status==OT_READBACK_MISMATCH && written.after==DEG(55) && g.calls==2);
+    /* Managed mode is separate from both supervised and dry-run modes.
+     * Test both directions and intermediate whole degrees in mocks only. */
+    const struct ot_arm ma = {OT_MANAGED_ARM_MAGIC,42,123,1030,DEG(50),DEG(55)};
+    struct ot_request mr = {OT_MANAGED_REQ_MAGIC,42,123,1020,DEG(55),DEG(50)};
+    g = (struct globals){1, DEG(55), 0, 0};
+#define MANAGED(a,r) ot_apply_managed((a),(r),42,1000,&g,heat,get,set)
+    assert(MANAGED(&wa,&wr).status == OT_REJECTED && g.calls == 0);
+    assert(MANAGED(&a,&r).status == OT_REJECTED && g.calls == 0);
+    bad_a=ma; bad_a.lower=DEG(20);
+    assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
+    bad_a=ma; bad_a.upper=DEG(60);
+    assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
+    bad_r=mr; bad_r.target=DEG(52)+1;
+    assert(MANAGED(&ma,&bad_r).status == OT_REJECTED && g.calls == 0);
+    bad_r=mr; bad_r.token++;
+    assert(MANAGED(&ma,&bad_r).status == OT_REJECTED && g.calls == 0);
+    assert(MANAGED(&ma,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(50));
+    assert(MANAGED(&ma,&mr).status == OT_REJECTED && g.calls == 1);
+    mr.expected=DEG(50); mr.target=DEG(53);
+    assert(MANAGED(&ma,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(53));
+    mr.expected=DEG(53); mr.target=DEG(55);
+    assert(MANAGED(&ma,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(55) && g.calls == 3);
     puts("OpenTherm handoff: all guard, isolated-write and mock setter assertions passed");
 }
