@@ -838,7 +838,11 @@ impl Bridge {
         binary("leaf", "Leaf", "", fields! {"icon" => "mdi:leaf"});
         binary("occupancy", "Occupancy", "occupancy", Fields::new());
         binary("external_power", "External power", "plug", fields! {"entity_category" => "diagnostic"});
-        binary("preconditioning_active", "Early-On active", "", fields! {"icon" => "mdi:clock-fast"});
+        let radiant = true_radiant_supported(dev);
+        let preheating_name = if radiant {
+            if can_cool { "Preconditioning Active" } else { "Preheating Active" }
+        } else { "Early-On Active" };
+        binary("preconditioning_active", preheating_name, "", fields! {"icon" => "mdi:clock-fast"});
         binary("sunlight_correction_active", "Sunblock active", "", fields! {"icon" => "mdi:weather-sunny"});
         binary("hvac_safety_shutoff_active", "Safety shutoff", "problem", fields! {"entity_category" => "diagnostic"});
         if truthy(dev.get("has_air_filter")) {
@@ -900,7 +904,24 @@ impl Bridge {
         sw(&mut add, "learning_mode", "Auto-Schedule", "mdi:school");
         sw(&mut add, "auto_away_enable", "Home/Away Assist", "mdi:home-account");
         sw(&mut add, "sunlight_correction_enabled", "Sunblock", "mdi:weather-sunny");
-        sw(&mut add, "preconditioning_enabled", "Early-On", "mdi:clock-fast");
+        // A radiant-only heating system uses a different native setting.
+        // Keep Early-On for cooling on mixed systems and for non-radiant equipment.
+        if !radiant || can_cool {
+            sw(&mut add, "preconditioning_enabled", "Early-On", "mdi:clock-fast");
+        }
+        if radiant {
+            sw(&mut add, "radiant_control_enabled", "True Radiant", "mdi:radiator");
+            if true_radiant_duration(dev).is_some() {
+                add("number", "true_radiant_max_duration", "True Radiant Max Duration", fields! {
+                    "value_template" => tmpl("true_radiant_max_duration"),
+                    "command_topic" => format!("{set}true_radiant_max_duration"),
+                    "min" => 0, "max" => 5, "step" => 1,
+                    "unit_of_measurement" => "h", "device_class" => "duration",
+                    "entity_category" => "config", "mode" => "slider",
+                    "icon" => "mdi:clock-outline",
+                });
+            }
+        }
         if truthy(dev.get("has_hot_water_control")) {
             add(
                 "switch",
@@ -1226,6 +1247,13 @@ impl Bridge {
         // Publish what changed; remove what the equipment no longer offers.
         let old = self.announced.lock().unwrap().replace(configs.clone()).unwrap_or_default();
         if old.is_empty() {
+            // Clear obsolete retained discovery after an upgrade or equipment change.
+            // In particular, the previous versions always announced Early-On.
+            for (component, key) in [("switch", "preconditioning_enabled"),
+                ("switch", "radiant_control_enabled"), ("number", "true_radiant_max_duration")] {
+                let topic = format!("{}/{component}/{id}/{key}/config", self.discovery);
+                if !configs.contains_key(&topic) { self.publish(&topic, true, b""); }
+            }
             // Only the numeric boost entity owns this setting.
             for component in ["select", "switch"] {
                 self.publish(&format!("{}/{component}/{id}/hot_water_boost/config", self.discovery), true, b"");
@@ -1424,6 +1452,22 @@ fn rfc3339(t: f64) -> Value {
         .map_or(Value::Null, |t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string().into())
 }
 
+/// True Radiant is selected by equipment, not by whether it is currently on.
+/// Only offer the control when the native device reports its actual boolean.
+pub(crate) fn true_radiant_supported(dev: &Fields) -> bool {
+    dev.get("radiant_control_enabled").and_then(Value::as_bool).is_some()
+        && (matches!(dev.get("heater_delivery").and_then(Value::as_str),
+            Some("radiator" | "in-floor-radiant"))
+            || dev.get("heat_link_heat_type").and_then(Value::as_str) == Some("opentherm"))
+}
+
+/// Native menu uses integer hours 0–5, stored in seconds.
+pub(crate) fn true_radiant_duration(dev: &Fields) -> Option<u64> {
+    let seconds = dev.get("max_nighttime_preconditioning_seconds")?.as_f64()?;
+    let hours = seconds / 3600.0;
+    ((0.0..=5.0).contains(&hours) && hours.fract() == 0.0).then_some(hours as u64)
+}
+
 /// What the entities show, from the device and shared buckets.
 pub fn state(dev: &Fields, sh: &Fields) -> Fields {
     let now = chrono::Utc::now().timestamp() as f64;
@@ -1535,6 +1579,10 @@ pub fn state(dev: &Fields, sh: &Fields) -> Fields {
         "heatpump_ready",
     ] {
         s.insert(k.into(), truthy(dev.get(k)).into());
+    }
+    if true_radiant_supported(dev) {
+        s.insert("radiant_control_enabled".into(), dev["radiant_control_enabled"].clone());
+        s.insert("true_radiant_max_duration".into(), true_radiant_duration(dev).map_or(Value::Null, Value::from));
     }
     s.insert("screen_timeout".into(), crate::screen::seconds(dev).into());
     s.insert("screen_always_on".into(), crate::screen::always_on(dev).into());
@@ -1769,6 +1817,59 @@ pub mod tests {
             "Home Assistant shows it in its own unit"
         );
         assert_eq!(eco["step"], json!(1), "Home Assistant takes the step in its own unit");
+    }
+
+    #[test]
+    fn true_radiant_discovery_and_commands_follow_equipment() {
+        let b = test_bridge();
+        let early = "homeassistant/switch/nestlocal_s/preconditioning_enabled/config";
+        let radiant = "homeassistant/switch/nestlocal_s/radiant_control_enabled/config";
+        let duration = "homeassistant/number/nestlocal_s/true_radiant_max_duration/config";
+        let sh = obj(json!({"can_heat":true,"can_cool":false}));
+        for delivery in ["radiator", "in-floor-radiant"] {
+            let dev = obj(json!({"heater_delivery":delivery,"heat_link_heat_type":"onoff",
+                "radiant_control_enabled":false,"preconditioning_enabled":true,
+                "max_nighttime_preconditioning_seconds":3600}));
+            b.announce(&dev,&sh);
+            let configs = b.announced.lock().unwrap().clone().unwrap();
+            assert!(!configs.contains_key(early));
+            let c: Value = serde_json::from_str(&configs[radiant]).unwrap();
+            assert_eq!(c["name"], json!("True Radiant"));
+            assert_eq!(c["device"]["identifiers"], json!(["nestlocal_s"]));
+            let c: Value = serde_json::from_str(&configs[duration]).unwrap();
+            assert_eq!((c["min"].clone(),c["max"].clone(),c["step"].clone()),(json!(0),json!(5),json!(1)));
+            assert_eq!(b.shown(&dev,&sh)["true_radiant_max_duration"],json!(1));
+            assert_eq!(b.shown(&dev,&sh)["radiant_control_enabled"],json!(false));
+            b.store.merge("device.S",&dev,0,0,true);
+            let (bucket, fields) = b.fields("radiant_control_enabled","ON").unwrap().unwrap();
+            assert_eq!(bucket,"device");
+            assert_eq!(fields["radiant_control_enabled"],json!(true));
+            assert_eq!(fields.len(),1);
+            for h in 0..=5 {
+                let (_, fields) = b.fields("true_radiant_max_duration",&h.to_string()).unwrap().unwrap();
+                assert_eq!(fields["max_nighttime_preconditioning_seconds"],json!(h*3600));
+            }
+            for invalid in ["-1","6","1.5","NaN","inf","3600"] {
+                assert!(b.fields("true_radiant_max_duration",invalid).is_err());
+            }
+            b.announce(&dev,&obj(json!({"can_heat":true,"can_cool":true})));
+            let configs = b.announced.lock().unwrap().clone().unwrap();
+            assert!(configs.contains_key(early) && configs.contains_key(radiant));
+        }
+        let forced = obj(json!({"heater_delivery":"forced-air","heat_link_heat_type":"onoff",
+            "radiant_control_enabled":false,"max_nighttime_preconditioning_seconds":3600}));
+        b.announce(&forced,&sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        assert!(configs.contains_key(early));
+        assert!(!configs.contains_key(radiant) && !configs.contains_key(duration));
+        b.store.merge("device.S",&forced,0,0,true);
+        assert!(b.fields("radiant_control_enabled","ON").is_err());
+        assert!(b.fields("true_radiant_max_duration","1").is_err());
+        let ot = obj(json!({"heat_link_heat_type":"opentherm","radiant_control_enabled":true}));
+        b.announce(&ot,&sh);
+        let configs = b.announced.lock().unwrap().clone().unwrap();
+        assert!(configs.contains_key(radiant) && !configs.contains_key(duration));
+        assert!(!configs.contains_key(early));
     }
 
     #[test]

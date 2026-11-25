@@ -389,6 +389,23 @@ impl Bridge {
 
             "hot_water_schedule" => device(fields! {"hot_water_mode" => if on_off(arg)? { "schedule" } else { "off" }}),
 
+            "radiant_control_enabled" => {
+                let supported = self.store.get(&format!("device.{}", self.serial))
+                    .is_some_and(|d| crate::bridge::true_radiant_supported(&d.value));
+                if !supported { return Err("True Radiant not supported by reported equipment".into()); }
+                device(fields! {"radiant_control_enabled" => on_off(arg)?})
+            }
+
+            "true_radiant_max_duration" => {
+                let supported = self.store.get(&format!("device.{}", self.serial))
+                    .is_some_and(|d| crate::bridge::true_radiant_supported(&d.value)
+                        && crate::bridge::true_radiant_duration(&d.value).is_some());
+                if !supported { return Err("True Radiant maximum duration not reported".into()); }
+                let hours = float(arg).filter(|h| (0.0..=5.0).contains(h) && h.fract() == 0.0)
+                    .ok_or_else(|| "expected a whole number of hours, 0-5".to_string())?;
+                device(fields! {"max_nighttime_preconditioning_seconds" => (hours as u64 * 3600)})
+            }
+
             "hot_water_temperature" => {
                 let supported = self.store.get(&format!("device.{}", self.serial))
                     .is_some_and(|d| self.opentherm_enabled(&d.value) && crate::opentherm::dhw_temperature_supported(&d.value));
