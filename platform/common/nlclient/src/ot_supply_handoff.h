@@ -20,15 +20,14 @@ static inline int ot_whole(uint32_t v) { return v && v <= OT_MAX && !(v & (OT_FI
 static inline int ot_live(uint32_t expires, uint32_t now) {
     return now && expires >= now && expires - now <= OT_TTL;
 }
-static inline int ot_authorized(const struct ot_arm *a, const struct ot_request *r, uint32_t pid,
-                                uint32_t now, uint32_t heating, uint32_t current) {
+static inline int ot_envelope(const struct ot_arm *a, const struct ot_request *r, uint32_t pid, uint32_t now) {
     return a->magic == OT_ARM_MAGIC && r->magic == OT_REQ_MAGIC && pid > 1 &&
            a->pid == pid && r->pid == pid && a->token && a->token == r->token &&
            ot_live(a->expires, now) && ot_live(r->expires, now) && r->expires <= a->expires &&
-           heating == 1 && ot_whole(a->lower) && ot_whole(a->upper) && a->lower <= a->upper &&
-           ot_whole(current) && current >= a->lower && current <= a->upper &&
-           r->expected == current && ot_whole(r->target) && r->target >= a->lower &&
-           r->target <= a->upper && r->target != current;
+           ot_whole(a->lower) && ot_whole(a->upper) && a->lower <= a->upper &&
+           ot_whole(r->expected) && r->expected >= a->lower && r->expected <= a->upper &&
+           ot_whole(r->target) && r->target >= a->lower && r->target <= a->upper &&
+           r->target != r->expected;
 }
 /* Both the arm and request must already have been claimed before calling.
  * A successful return is only an in-memory observation, NOT a boiler ACK. */
@@ -37,9 +36,9 @@ static inline struct ot_ack ot_apply(const struct ot_arm *a, const struct ot_req
                                      uint32_t (*heat)(void *), uint32_t (*get)(void *),
                                      void (*set)(void *, uint32_t), int writes) {
     struct ot_ack ack = {OT_ACK_MAGIC, pid, r->token, OT_REJECTED, 0, 0};
-    if (!globals) return ack;
+    if (!globals || !ot_envelope(a, r, pid, now) || heat(globals) != 1) return ack;
     ack.before = ack.after = get(globals);
-    if (!ot_authorized(a, r, pid, now, heat(globals), ack.before)) return ack;
+    if (ack.before != r->expected) return ack;
     ack.status = OT_VALIDATED;
     if (writes) {
         set(globals, r->target);
