@@ -57,6 +57,12 @@ The equipment-screen and appsetup PNG warnings also occur in successful original
 
 The observer must remain uninstalled. Investigate the existing factory guard and startup diagnostics offline before any further device experiment. A future device test would require a genuinely completed startup check, immediate rollback on loss of the original PID or initialization failure, a separate test environment where possible, and preservation of Monit/watchdog recovery. Do not remove or bypass the fault guard as a workaround. The previous mocked QEMU tests and successful static audit do not prove live compatibility.
 
+## Control test: unmodified V6.6 warm restart passed
+
+On 25 November, the original installed SHA-256 was confirmed, no temporary executable mount existed, and only /var/run/unfr0zen-screen.done was present. The normal /etc/init.d/nestlabs restart successfully replaced PID 554 with PID 4853 without rebooting the thermostat. The .done marker was refreshed, native control logs resumed and the Heat Link returned ViewConfirm and boiler information. This rules out a general inability to restart V6.6 warm; it does not establish whether the earlier failure was caused by the observer, bind-mounted executable, or a transient startup state. The initial native control line after restart was LEARNING_BAND / HEAT / STAGE_1_HEAT; verify normal OpenTherm modulation once communication has settled before concluding that operation is fully restored.
+
+The original screen fault marker is not proof of the earlier cause. Preserve it and Monit/watchdog recovery. Do not reactivate the failed probe. The next development work is offline review and normal builder integration, with an isolated startup test before another live experiment. No write enablement or functional source change is included in this checkpoint.
+
 ## Remaining gates before a writable release
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
