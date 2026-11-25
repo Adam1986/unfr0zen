@@ -27,6 +27,11 @@ jobs:
           rustup default stable
       - name: Test disabled supply temperature commands
         run: cargo test --locked -p nestlocal --bin nestlocal experimental_supply_temperature_commands_fail_closed
+      - name: Test MQTT packet handling and retained metadata
+        run: |
+          cargo test --locked -p nestlocal --bin nestlocal mqtt::tests::a_session_with_a_loopback_broker
+          cargo test --locked -p nestlocal --bin nestlocal mqtt::tests::publishes_as_they_arrive
+          cargo test --locked -p nestlocal --bin nestlocal opentherm_retained_commands_leave_weather_and_readback_intact
       - name: Test OpenTherm and existing command handling
         run: |
           cargo test --locked -p nestlocal --bin nestlocal opentherm
