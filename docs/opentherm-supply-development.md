@@ -119,3 +119,9 @@ keeper PID file alone does not prove that pthread creation succeeded. A live
 heartbeat is preferable. No release, broad temperature range, or unattended
 write has yet been validated. Preserve the stable V6.6 branch and native
 screen/watchdog guards.
+
+## Live V6 automatic-start test — 25 November 2026
+
+The read-only mode 3 candidate started after a warm restart without physical menu interaction. PID 21303 published advancing heartbeat timestamps 1795636545 and 1795636547, screen guard clear. Native main-thread ACK status 1 confirmed before/after 3604480 (55°C); no setter was linked. V6.6 restored at PID 21879, original hash and Monit verified. This validates automatic startup on the reviewed unit under the tested warm-restart conditions; cold boot and the combined managed write candidate are not yet live tested.
+
+Mode 4 combines this automatic worker with the V5 native setter and the managed Rust record magic. Its pilot interval is restricted to 50–55°C, with no default enabled policy or MQTT producer. It uses separate ot-managed.* command files and heartbeat mode 4. Both directions and intermediate whole degrees are covered by mock tests, not live evidence. Before enabling a producer, ensure installation-specific limits, single-flight file ownership, fresh readback, persistent confirmation, and no replay or retry after uncertainty. Normal builds and previous experiment modes remain separate.
