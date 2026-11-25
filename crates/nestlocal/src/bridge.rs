@@ -651,9 +651,9 @@ impl Bridge {
                 "name" => if name.is_empty() { Value::Null } else { name.into() }, // null: the device's own name
                 "unique_id" => format!("{id}_{key}"),
                 "default_entity_id" => format!("{component}.{root}_{key}"),
-                // All OpenTherm-specific settings and telemetry share the linked device.
-                "device" => Value::Object(if key.starts_with("opentherm_")
-                    || (key == "hot_water_temperature" && component == "number") {
+                // Boiler telemetry and Pro Setup limit share the linked device.
+                // The user-facing DHW target stays with the main thermostat controls.
+                "device" => Value::Object(if key.starts_with("opentherm_") {
                     boiler_device.clone()
                 } else { device.clone() }),
                 "availability_topic" => format!("{}/availability", self.base),
@@ -1182,7 +1182,6 @@ impl Bridge {
                     "step" => 1,
                     "unit_of_measurement" => "°C",
                     "device_class" => "temperature",
-                    "entity_category" => "config",
                     "mode" => "slider",
                 });
                 add("number", "hot_water_temperature", "DHW Target Temperature", c);
@@ -1948,7 +1947,8 @@ pub mod tests {
         let configs = b.announced.lock().unwrap().clone().unwrap();
         let config: Value = serde_json::from_str(&configs[topic]).unwrap();
         assert_eq!(config["command_topic"], json!("nestlocal/S/set/hot_water_temperature"));
-        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s_opentherm"]));
+        assert_eq!(config["device"]["identifiers"], json!(["nestlocal_s"]));
+        assert!(config.get("entity_category").is_none());
         assert_eq!(config["unique_id"], json!("nestlocal_s_hot_water_temperature"));
         assert_eq!(config["min"].as_f64(), Some(40.0));
         assert_eq!(config["max"].as_f64(), Some(65.0));
