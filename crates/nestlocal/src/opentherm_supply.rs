@@ -293,7 +293,7 @@ impl Pilot {
         crate::logf!("OpenTherm pilot: published {before} -> {target} C, token {token}");
         Ok(())
     }
-    pub(crate) fn poll(&self, watch: &crate::opentherm::Watch) {
+    pub(crate) fn poll(&self) {
         let mut run = self.run.lock().unwrap();
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
