@@ -539,6 +539,7 @@ impl Bridge {
     /// awake for now (wake.rs).
     pub fn holds_awake(&self) -> bool {
         self.mqtt.get().is_some_and(mqtt::Client::holds_awake) || self.updates.get().is_some_and(|u| u.installing())
+            || self.supply_pilot.get().is_some_and(crate::opentherm_supply::Pilot::active)
     }
 
     fn publish_availability(&self, alive: bool) {
