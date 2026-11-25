@@ -44,6 +44,11 @@ pub trait Handler: Send + Sync + 'static {
     fn connected(&self);
     /// A message on a subscribed topic.
     fn message(&self, topic: &str, payload: &[u8]);
+    /// The broker's PUBLISH RETAIN bit. In MQTT 3.1.1 this marks replay
+    /// of a stored message, not necessarily the publisher's original flag.
+    fn message_with_retain(&self, topic: &str, payload: &[u8], _retained: bool) {
+        self.message(topic, payload);
+    }
 }
 
 /// A broker URL: tcp:// or mqtt:// in the clear, ssl://, tls:// or
@@ -370,7 +375,7 @@ impl Connection {
                                 wr.write_all(&[0x40, 2, (id >> 8) as u8, id as u8]).await?;
                                 self.sent.store(unix_now(), Ordering::Relaxed);
                             }
-                            handler.message(&topic, &payload);
+                            handler.message_with_retain(&topic, &payload, header & 1 != 0);
                         }
                     }
                 }
@@ -647,7 +652,7 @@ pub mod tests {
     #[derive(Default)]
     struct Recorder {
         connected: AtomicBool,
-        messages: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        messages: std::sync::Mutex<Vec<(String, Vec<u8>, bool)>>,
     }
 
     impl Handler for Recorder {
@@ -655,7 +660,10 @@ pub mod tests {
             self.connected.store(true, Ordering::Relaxed);
         }
         fn message(&self, topic: &str, payload: &[u8]) {
-            self.messages.lock().unwrap().push((topic.into(), payload.to_vec()));
+            self.message_with_retain(topic, payload, false);
+        }
+        fn message_with_retain(&self, topic: &str, payload: &[u8], retained: bool) {
+            self.messages.lock().unwrap().push((topic.into(), payload.to_vec(), retained));
         }
     }
 
@@ -716,9 +724,9 @@ pub mod tests {
         assert_eq!(
             *handler.messages.lock().unwrap(),
             vec![
-                ("nestlocal/S/set/mode".to_string(), b"heat".to_vec()),
-                ("a".to_string(), b"1".to_vec()),
-                ("b".to_string(), vec![]),
+                ("nestlocal/S/set/mode".to_string(), b"heat".to_vec(), false),
+                ("a".to_string(), b"1".to_vec(), false),
+                ("b".to_string(), vec![], true),
             ]
         );
 
