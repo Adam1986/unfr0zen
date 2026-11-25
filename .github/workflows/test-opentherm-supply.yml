@@ -48,3 +48,20 @@ jobs:
           cargo test --locked -p nestlocal --bin nestlocal schedule
       - name: Check native firmware builder tests
         run: cargo test --locked -p unfr0zen-core --lib
+
+      - name: Build host-only real-image audit kit
+        run: |
+          cargo build --locked -p unfr0zen-core --bin nlclient
+          mkdir -p audit-kit
+          cp target/debug/nlclient audit-kit/nlclient-audit
+          for mode in 0 1 2; do
+            UNFR0ZEN_OT_SUPPLY_EXPERIMENT=$mode sh platform/common/nlclient/build.sh "audit-kit/mode-$mode"
+          done
+          # This is a host diagnostic kit only; no stock or patched firmware.
+          tar -czf opentherm-host-audit.tar.gz -C audit-kit .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opentherm-host-audit
+          path: opentherm-host-audit.tar.gz
+          retention-days: 3
+          if-no-files-found: error
