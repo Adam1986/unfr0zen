@@ -9,7 +9,6 @@ const REQ_MAGIC: u32 = 0x3143544f; // OTC1: reserved managed request
 const ACK_MAGIC: u32 = 0x314b544f; // OTK1: existing acknowledgement
 const TTL: u32 = 30;
 const ACK_WAIT: Duration = Duration::from_secs(35);
-const PERSIST_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Limits { min: u32, max: u32 }
@@ -41,7 +40,6 @@ pub(crate) struct Generation { pub pid: u32, pub start_ticks: u64 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     AwaitingNative,
-    AwaitingPersistence,
     Confirmed,
     Rejected,
     Uncertain,
@@ -55,7 +53,6 @@ pub(crate) struct Transaction {
     before: u32,
     target: u32,
     outcome: Outcome,
-    ack_at: Option<Duration>,
 }
 
 fn encode(words: [u32; 6]) -> [u8; 24] {
@@ -82,7 +79,7 @@ impl Transaction {
             return None;
         }
         Some(Self { generation, token, expires: now.checked_add(TTL)?, limits, before, target,
-                    outcome: Outcome::AwaitingNative, ack_at: None })
+                    outcome: Outcome::AwaitingNative })
     }
 
     /// A future IO adapter must publish arm first, request last, once only,
@@ -95,52 +92,27 @@ impl Transaction {
                  self.before * FIXED, self.target * FIXED]))
     }
 
-    /// Read-only observations. elapsed is monotonic since publication.
-    /// Supply values are native 16.16 raw values, not object-store echoes.
-    /// A correlated native getter ACK and persisted setting are two separate
-    /// observations. A later native UI event is optional corroboration, not
-    /// a requirement: the direct setter need not emit the UI event.
+    /// A matching status-2 ACK means the native setter returned and its
+    /// immediate native getter matched the requested value. That is the
+    /// transaction's confirmation point; the local settings file and a
+    /// separate Heat Link ACK are not prerequisites.
     /// No terminal outcome can be changed by later or duplicated evidence.
     pub(crate) fn observe(&mut self, generation: Option<Generation>, elapsed: Duration,
-                          ack: Option<&[u8]>, saved: Option<u32>, telemetry: Option<u32>) -> Outcome {
-        if !matches!(self.outcome, Outcome::AwaitingNative | Outcome::AwaitingPersistence) {
+                          ack: Option<&[u8]>) -> Outcome {
+        if self.outcome != Outcome::AwaitingNative {
             return self.outcome;
         }
-        if generation != Some(self.generation) {
+        if generation != Some(self.generation) || elapsed > ACK_WAIT {
             self.outcome = Outcome::Uncertain;
             return self.outcome;
         }
-        if self.outcome == Outcome::AwaitingNative {
-            if elapsed > ACK_WAIT {
-                self.outcome = Outcome::Uncertain;
-                return self.outcome;
-            }
-            if let Some([magic, pid, token, status, before, after]) = ack.and_then(decode) {
-                if (magic, pid, token) == (ACK_MAGIC, self.generation.pid, self.token) {
-                    match status {
-                        0 if before == after => self.outcome = Outcome::Rejected,
-                        2 if before == self.before * FIXED && after == self.target * FIXED => {
-                            self.outcome = Outcome::AwaitingPersistence;
-                            self.ack_at = Some(elapsed);
-                        }
-                        _ => self.outcome = Outcome::Uncertain,
-                    }
-                }
-            }
-        }
-        if self.outcome == Outcome::AwaitingPersistence {
-            if elapsed.saturating_sub(self.ack_at.unwrap_or(elapsed)) > PERSIST_WAIT {
-                self.outcome = Outcome::Uncertain;
-            } else if saved.is_some_and(|v| v != self.before * FIXED && v != self.target * FIXED)
-                || telemetry.is_some_and(|v| v != self.target * FIXED) {
-                // A strictly later, contradictory UI event may be another
-                // local change. Do not release the lock on this evidence.
-                self.outcome = Outcome::Uncertain;
-            } else if saved == Some(self.target * FIXED) {
-                // Only reachable after the matching status-2 ACK has
-                // independently verified native before/after readback.
-                // This confirms the Nest setting, not a Heat Link ACK.
-                self.outcome = Outcome::Confirmed;
+        if let Some([magic, pid, token, status, before, after]) = ack.and_then(decode) {
+            if (magic, pid, token) == (ACK_MAGIC, self.generation.pid, self.token) {
+                self.outcome = match status {
+                    0 if before == after => Outcome::Rejected,
+                    2 if before == self.before * FIXED && after == self.target * FIXED => Outcome::Confirmed,
+                    _ => Outcome::Uncertain,
+                };
             }
         }
         self.outcome
@@ -233,7 +205,6 @@ fn saved_raw(path: &Path) -> Option<u32> {
 }
 struct Active {
     tx: Transaction,
-    issued: u32,
     started: Instant,
 }
 struct Run {
@@ -317,7 +288,7 @@ impl Pilot {
             run.status = "review_required";
             return Err(format!("native publication uncertain: {e}"));
         }
-        run.active = Some(Active { tx, issued:t, started:Instant::now() });
+        run.active = Some(Active { tx, started:Instant::now() });
         run.status = "awaiting_native";
         crate::logf!("OpenTherm pilot: published {before} -> {target} C, token {token}");
         Ok(())
@@ -326,14 +297,9 @@ impl Pilot {
         let mut run = self.run.lock().unwrap();
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
-        let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref(),
-            saved_raw(&self.settings),watch.pilot_event_since(i64::from(active.issued) + 1));
-        if outcome == Outcome::Confirmed {
-            watch.note_managed_persisted(i64::from(active.issued));
-        }
+        let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
-            Outcome::AwaitingPersistence => "awaiting_persistence",
             Outcome::Confirmed => "confirmed",
             Outcome::Rejected => "rejected",
             Outcome::Uncertain => "review_required",
@@ -415,58 +381,44 @@ mod tests {
         assert_eq!(decode(&r[..23]),None);
     }
     #[test]
-    fn delayed_persistence_is_not_a_failed_native_write() {
+    fn native_status_two_ack_confirms_without_a_settings_file_or_heat_link_ack() {
         let mut t = trial();
         let a = ack(2,55,50);
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&a),Some(55*FIXED),Some(50*FIXED)),Outcome::AwaitingPersistence);
-        assert_eq!(t.observe(Some(GEN),secs(40),None,Some(55*FIXED),Some(50*FIXED)),Outcome::AwaitingPersistence);
-        assert_eq!(t.observe(Some(GEN),secs(45),None,Some(50*FIXED),Some(50*FIXED)),Outcome::Confirmed);
-    }
-    #[test]
-    fn live_pilot_regression_missing_ui_event_is_not_failure() {
-        let mut t = trial();
-        let a = ack(2,55,50);
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&a),Some(55*FIXED),None),Outcome::AwaitingPersistence);
-        assert_eq!(t.observe(Some(GEN),secs(10),None,Some(50*FIXED),None),Outcome::Confirmed);
-        assert_eq!(t.observe(Some(GEN),secs(150),None,Some(50*FIXED),None),Outcome::Confirmed);
-    }
-    #[test]
-    fn persistence_alone_and_conflicting_later_ui_event_never_confirm() {
-        let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),None,Some(50*FIXED),None),Outcome::AwaitingNative);
-        assert_eq!(t.observe(Some(GEN),secs(36),None,Some(50*FIXED),None),Outcome::Uncertain);
-        let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),Some(50*FIXED),Some(55*FIXED)),Outcome::Uncertain);
-        let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),Some(55*FIXED),None),Outcome::AwaitingPersistence);
-        assert_eq!(t.observe(Some(GEN),secs(123),None,Some(55*FIXED),None),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&a)),Outcome::Confirmed);
+        // Confirmed is terminal; delayed or contradictory evidence cannot
+        // turn this already verified native transaction into a false negative.
+        assert_eq!(t.observe(Some(GEN),secs(150),None),Outcome::Confirmed);
+        assert_eq!(t.observe(Some(GEN),secs(151),Some(&ack(3,55,55))),Outcome::Confirmed);
     }
     #[test]
     fn stale_ack_and_restart_never_confirm() {
         let mut t = trial();
         let stale = encode([ACK_MAGIC,42,78,2,55*FIXED,50*FIXED]);
-        assert_eq!(t.observe(Some(GEN),secs(5),Some(&stale),Some(50*FIXED),Some(50*FIXED)),Outcome::AwaitingNative);
+        assert_eq!(t.observe(Some(GEN),secs(5),Some(&stale)),Outcome::AwaitingNative);
         let next = Generation { start_ticks: 124, ..GEN };
-        assert_eq!(t.observe(Some(next),secs(6),Some(&ack(2,55,50)),Some(50*FIXED),Some(50*FIXED)),Outcome::Uncertain);
-        assert_eq!(t.observe(Some(GEN),secs(7),Some(&ack(2,55,50)),Some(50*FIXED),Some(50*FIXED)),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(next),secs(6),Some(&ack(2,55,50))),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(7),Some(&ack(2,55,50))),Outcome::Uncertain);
     }
     #[test]
     fn native_rejection_and_readback_mismatch() {
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(0,55,55)),None,None),Outcome::Rejected);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(0,55,55))),Outcome::Rejected);
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(3,55,55)),None,None),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(3,55,55))),Outcome::Uncertain);
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,55)),None,None),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,55))),Outcome::Uncertain);
+        let mut t = trial();
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,54,50))),Outcome::Uncertain);
     }
     #[test]
-    fn timeouts_and_conflicting_readback_are_terminal() {
+    fn timeouts_and_wrong_ack_are_terminal_or_wait_only_for_native_ack() {
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(36),None,None,None),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(36),None),Outcome::Uncertain);
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),None,None),Outcome::AwaitingPersistence);
-        assert_eq!(t.observe(Some(GEN),secs(123),None,Some(50*FIXED),Some(50*FIXED)),Outcome::Uncertain);
+        assert_eq!(t.observe(Some(GEN),secs(2),None),Outcome::AwaitingNative);
+        assert_eq!(t.observe(Some(GEN),secs(3),Some(&ack(2,55,50))),Outcome::Confirmed);
         let mut t = trial();
-        assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,50)),Some(52*FIXED),None),Outcome::Uncertain);
+        let wrong = encode([ACK_MAGIC,42,77,2,50*FIXED,55*FIXED]);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&wrong)),Outcome::Uncertain);
     }
 }
