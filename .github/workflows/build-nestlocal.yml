@@ -88,6 +88,9 @@ jobs:
       - name: Test OpenTherm parser and discovery
         run: cargo test --locked -p nestlocal --bin nestlocal opentherm
 
+      - name: Test True Radiant equipment discovery and commands
+        run: cargo test --locked -p nestlocal --bin nestlocal true_radiant
+
       - name: Test Heat Link diagnostic capture
         run: cargo test --locked -p nestlocal --bin nestlocal heatlink_capture
 
