@@ -71,4 +71,24 @@ static inline __attribute__((always_inline)) struct ot_ack ot_apply_isolated_wri
     request.magic = OT_REQ_MAGIC;
     return ot_apply(&arm, &request, pid, now, globals, heat, get, set, 1);
 }
+/* Managed pilot ABI shared with nestlocal::opentherm_supply.
+ * The pilot is restricted to the previously exercised installation's
+ * interval. This is NOT a general boiler operating range. A future
+ * installation must explicitly configure and validate its own limits. */
+#define OT_MANAGED_ARM_MAGIC 0x314d544fu
+#define OT_MANAGED_REQ_MAGIC 0x3143544fu
+static inline __attribute__((always_inline)) struct ot_ack ot_apply_managed(const struct ot_arm *a, const struct ot_request *r,
+                                     uint32_t pid, uint32_t now, void *globals,
+                                     uint32_t (*heat)(void *), uint32_t (*get)(void *),
+                                     void (*set)(void *, uint32_t)) {
+    struct ot_ack rejected = {OT_ACK_MAGIC, pid, r->token, OT_REJECTED, 0, 0};
+    if (!set || a->magic != OT_MANAGED_ARM_MAGIC || r->magic != OT_MANAGED_REQ_MAGIC ||
+        a->lower < 50u * OT_FIXED || a->upper > 55u * OT_FIXED || a->lower >= a->upper)
+        return rejected;
+    struct ot_arm arm = *a;
+    struct ot_request request = *r;
+    arm.magic = OT_ARM_MAGIC;
+    request.magic = OT_REQ_MAGIC;
+    return ot_apply(&arm, &request, pid, now, globals, heat, get, set, 1);
+}
 #endif
