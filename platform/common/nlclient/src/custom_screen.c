@@ -635,14 +635,21 @@ u32 custom_swap(void *display, void *surface) {
  * (the owner grabs them), so it would let the display go dark. A thread of
  * nlclient's own lights it every KEEPER_PERIOD as a command from Home
  * Assistant does (wake_display), and never sends nlclient input. */
-#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
-static void ot_poll_dry(void *globals);
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
+#define OT_EVENT_HANDLER ot_dry_event
+#define OT_POLL ot_poll_dry
+#else
+#define OT_EVENT_HANDLER ot_write_event
+#define OT_POLL ot_poll_write
+#endif
+static void OT_POLL(void *globals);
 #endif
 static void *keeper(void *globals) {
     for (;;) {
         native_usleep(KEEPER_PERIOD * 1000000);
-#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
-        ot_poll_dry(globals);
+#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT
+        OT_POLL(globals);
 #endif
         if (screen_owned())
             wake_display(globals);
@@ -803,7 +810,7 @@ static int after_commit(void *bucket, int result) {
 extern uint32_t native_ot_heat_get(void *);
 extern uint32_t native_ot_supply_get(void *);
 extern void native_ot_supply_set(void *, uint32_t);
-/* Existing keeper/main-thread queue (dry-run), or device commit (isolated write).
+/* Existing keeper/main-thread queue, proven by the V4 native dry-run.
  * Claim both files before touching native state. Never retry a taken request.
  * The optional experimental object is accepted by the builder only for the
  * exact reviewed stock ELF. No MQTT producer is enabled. */
@@ -817,60 +824,46 @@ static int ot_read_record(const char *path, void *record, unsigned int size) {
 }
 static void ot_supply_claimed(void *globals) {
     if (!globals) return;
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
     write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 2, 1);
-#endif
     struct ot_request request;
     struct ot_arm arm;
     if (!ot_read_record(RUN "ot-supply.taken", &request, sizeof(request))) return;
     if (rename_setting(RUN "ot-supply.arm", RUN "ot-supply.arm.taken") ||
         !ot_read_record(RUN "ot-supply.arm.taken", &arm, sizeof(arm))) return;
     if (attempt_pending()) return;
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
     write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 3, 1);
-#endif
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
     struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
-                                  native_ot_heat_get, native_ot_supply_get,
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
-                                  0, 0);
+                                  native_ot_heat_get, native_ot_supply_get, 0, 0);
 #else
-                                  native_ot_supply_set, 1);
+    struct ot_ack ack = ot_apply_isolated_write(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
+                                  native_ot_heat_get, native_ot_supply_get, native_ot_supply_set);
 #endif
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
     write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 4, 1);
-#endif
     void *file = native_fopen(RUN "ot-supply.ack.tmp", "wb");
     if (!file) return;
     unsigned int n = native_fwrite(&ack, 1, sizeof(ack), file);
     if (native_fclose(file) == 0 && n == sizeof(ack))
         rename_setting(RUN "ot-supply.ack.tmp", RUN "ot-supply.ack");
 }
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1
-/* Dry-run only. The existing keeper claims the file, not native state.
- * The existing queue_handler dispatches the observation on nlclient's
- * main thread. Never reuse this path for a write without separate review. */
-static int ot_dry_event(struct wake_handler *handler, void *event) {
+/* The keeper claims the file, never touches native state.
+ * queue_handler dispatches on nlclient's main thread. Mode 2 requires the
+ * distinct isolated-write authorisation; no MQTT producer exists. */
+static int OT_EVENT_HANDLER(struct wake_handler *handler, void *event) {
     (void)event;
     void *globals = handler->globals;
     native_delete(handler);
     ot_supply_claimed(globals);
     return RESULT_HANDLED;
 }
-static void ot_poll_dry(void *globals) {
+static void OT_POLL(void *globals) {
     if (!globals || rename_setting(RUN "ot-supply.request", RUN "ot-supply.taken")) return;
     write_numbers(RUN "ot-supply.stage", (u32)native_getpid(), 1, 1);
-    queue_handler(globals, ot_dry_event);
+    queue_handler(globals, OT_EVENT_HANDLER);
 }
 #endif
-#endif
 int custom_device_commit(void *bucket) {
-    int result = after_commit(bucket, native_device_commit(bucket));
-#if defined(UNFR0ZEN_OT_SUPPLY_EXPERIMENT) && UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 2
-    void *globals = PTR(bucket, BUCKET_GLOBALS_OFFSET);
-    if (globals && !rename_setting(RUN "ot-supply.request", RUN "ot-supply.taken"))
-        ot_supply_claimed(globals);
-#endif
-    return result;
+    return after_commit(bucket, native_device_commit(bucket));
 }
 int custom_shared_commit(void *bucket) { return after_commit(bucket, native_shared_commit(bucket)); }
 int custom_schedule_commit(void *bucket) { return after_commit(bucket, native_schedule_commit(bucket)); }
