@@ -299,7 +299,7 @@ impl Bridge {
                 loop {
                     let Some(b) = bridge.upgrade() else { break; };
                     let Some(pilot) = b.supply_pilot.get() else { break; };
-                    pilot.poll(&b.opentherm);
+                    pilot.poll();
                     let current = pilot.snapshot(&b.opentherm);
                     if last != Some(current) {
                         last = Some(current);
