@@ -19,10 +19,18 @@ The archived link audit was rerun: 26 static checks and 15 Python model tests pa
 
 Named supply writes and raw writes containing the supply property, capability property or readback field are refused through the Bridge command path. A regression test checks no bucket change or notification, and that unrelated raw commands still work. This gate does not cover every possible native or external protocol path. A branch-only CI workflow runs host regression tests; it neither creates a release nor uploads an installable artifact.
 
+## Checkpoint: native ABI and dormant builder audit
+
+- The completed CI run [#6](https://github.com/Adam1986/unfr0zen/actions/runs/45630453334) passed all steps, including retained MQTT handling and the existing native builder tests.
+- The new ARM harness uses the linked candidate's instructions with mock allocator, constructor, property map, event registration, getter and setter. It compiles locally as a standalone ARM executable. CI now executes it under QEMU; passing that test does not establish the real C++ object's lifecycle or boiler behaviour.
+- On the supplied exact-hash binary, a local in-memory audit appended 332 bytes to the existing RX segment, preserved both original hook words, and reproduced the UFP1 journal forward and backward with identical original SHA-256. No firmware image was written.
+- Builder tests now exercise the append and rollback primitive with a synthetic ELF fixture using the actual Rust Patch implementation. The helper is test-only and does not alter the production build.
+- Native property construction includes C++ cleanup paths; the stock ARM exception index ends at 0x5ab824 (cantunwind), below the appended code. Do not activate the registration hook until unwind coverage, ownership, insertion failure and duplicate-registration semantics are addressed.
+
 ## Remaining gates before a writable release
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
-2. Preserve incoming MQTT RETAIN metadata and reject retained supply commands without disrupting retained weather inputs.
+2. Completed: preserve incoming MQTT RETAIN metadata and reject retained supply commands without disrupting retained weather inputs.
 3. Require explicit installation-specific operating limits confirmed against boiler and system documentation; no generic default.
 4. Keep all write paths disabled unless both native and bridge validation are in place; independent fresh native observation must confirm any change. A local object-store echo is not confirmation.
 5. Exercise native and Rust regressions, prove rollback and test isolated from the live boiler before controlled testing.
