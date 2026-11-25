@@ -32,6 +32,7 @@ mod opentherm;
 mod ot_registers;
 mod package;
 mod power;
+mod prediction;
 mod schedule;
 mod schedule_control;
 mod scratch;
@@ -344,6 +345,7 @@ async fn run(config: flags::Config) {
             mqtttls::broker(&config.mqtt, config.mqtt_tls, &config.mqtt_ca).unwrap_or_else(|e| fatal!("{e}"));
         bridge.run(&broker, &config.mqtt_user, &password, tls);
         bridge.watch_opentherm(config.settings.clone().into());
+        bridge.watch_prediction();
         broker_port = Some(broker.port);
     }
     if config.zigbee {

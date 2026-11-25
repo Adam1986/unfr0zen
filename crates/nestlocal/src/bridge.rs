@@ -76,6 +76,7 @@ pub struct Bridge {
     pub power: Arc<crate::power::Watch>,
     opentherm: Arc<crate::opentherm::Watch>,
     opentherm_platform: bool,
+    prediction: Mutex<Option<crate::prediction::Sample>>,
     mqtt: OnceLock<mqtt::Client>,
     /// The unit's wakes since nestlocal started (wake.rs).
     wakes: AtomicU64,
@@ -131,6 +132,7 @@ impl Bridge {
             power: Arc::new(crate::power::Watch::default()),
             opentherm: Arc::new(crate::opentherm::Watch::default()),
             opentherm_platform: crate::opentherm::supported_platform(nestlocal::device::current().name),
+            prediction: Mutex::new(None),
             mqtt: OnceLock::new(),
             wakes: AtomicU64::new(0),
             announced: Mutex::new(None),
@@ -295,6 +297,39 @@ impl Bridge {
                 }
             });
         });
+    }
+
+    /// Poll the bounded native log tail without holding the thermostat awake.
+    pub fn watch_prediction(self: &Arc<Self>) {
+        if !self.opentherm_platform { return; } // validated on diamond3 only
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut previous = Fields::new();
+            loop {
+                let sample = tokio::task::spawn_blocking(|| crate::prediction::latest(std::path::Path::new("/media/log/nlclient"))).await.ok().flatten();
+                let Some(bridge) = weak.upgrade() else { return; };
+                if let Some(sample) = sample {
+                    *bridge.prediction.lock().unwrap() = Some(sample);
+                }
+                let buckets = bridge.buckets();
+                if let (Some(dev), Some(sh)) = (buckets.get("device"), buckets.get("shared")) {
+                    let next = bridge.prediction_fields(dev, &bridge.state(dev, sh));
+                    if next != previous {
+                        previous = next;
+                        bridge.publish_state();
+                    }
+                }
+                drop(bridge);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
+
+    fn prediction_fields(&self, dev: &Fields, state: &Fields) -> Fields {
+        if !self.opentherm_platform || !true_radiant_supported(dev) { return Fields::new(); }
+        let week = self.configured_schedule();
+        crate::prediction::values(dev, state, week.as_ref(), *self.prediction.lock().unwrap(),
+            chrono::Utc::now().timestamp_millis(), &chrono::Local)
     }
 
     /// Asks Home Assistant for the time (its time automation); the answer
@@ -584,6 +619,7 @@ impl Bridge {
                 _ => {}
             }
         }
+        shown.extend(self.prediction_fields(dev, &shown));
         shown.insert("occupancy".into(), self.occupancy.occupied().into());
         let (brightness, automatic) = crate::brightness::reported(dev, self.brightness.shown());
         shown.insert("screen_brightness".into(), brightness.map_or(Value::Null, Value::from));
@@ -781,6 +817,16 @@ impl Bridge {
             "Time to temperature",
             fields! {"value_template" => tmpl("time_to_target"), "device_class" => "timestamp"},
         );
+        if self.opentherm_platform && true_radiant_supported(dev) {
+            add("sensor", "next_scheduled_setpoint", "Next Scheduled Setpoint", fields! {
+                "value_template" => tmpl("next_scheduled_setpoint"), "device_class" => "timestamp"});
+            add("sensor", "next_scheduled_temperature", "Next Scheduled Temperature", fields! {
+                "value_template" => tmpl("next_scheduled_temperature"), "device_class" => "temperature", "unit_of_measurement" => "°C"});
+            add("sensor", "predicted_heating_start", "Predicted Heating Start", fields! {
+                "value_template" => tmpl("predicted_heating_start"), "device_class" => "timestamp"});
+            add("sensor", "predicted_preheating_duration", "Predicted Preheating Duration", fields! {
+                "value_template" => tmpl("predicted_preheating_duration"), "device_class" => "duration", "unit_of_measurement" => "min"});
+        }
         add("sensor", "hvac_action", "HVAC action", fields! {"value_template" => tmpl("action"), "icon" => "mdi:hvac"});
         add(
             "sensor",
@@ -1249,7 +1295,9 @@ impl Bridge {
             // Clear obsolete retained discovery after an upgrade or equipment change.
             // In particular, the previous versions always announced Early-On.
             for (component, key) in [("switch", "preconditioning_enabled"),
-                ("switch", "radiant_control_enabled"), ("number", "true_radiant_max_duration")] {
+                ("switch", "radiant_control_enabled"), ("number", "true_radiant_max_duration"),
+                ("sensor", "next_scheduled_setpoint"), ("sensor", "next_scheduled_temperature"),
+                ("sensor", "predicted_heating_start"), ("sensor", "predicted_preheating_duration")] {
                 let topic = format!("{}/{component}/{id}/{key}/config", self.discovery);
                 if !configs.contains_key(&topic) { self.publish(&topic, true, b""); }
             }
