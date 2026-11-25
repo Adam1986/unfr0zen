@@ -29,6 +29,9 @@ mod network;
 mod nlsettings;
 mod occupancy;
 mod opentherm;
+// Staged managed protocol; no command producer is enabled yet.
+#[allow(dead_code)]
+mod opentherm_supply;
 mod ot_registers;
 mod package;
 mod power;
