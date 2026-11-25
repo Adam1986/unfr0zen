@@ -16,4 +16,7 @@ grep -q native_ot_supply_get "$tmp/1/symbols"
 if grep -q native_ot_supply_set "$tmp/1/symbols"; then echo "dry-run references setter" >&2; exit 1; fi
 grep -q ot_dry_event "$tmp/1/symbols"
 grep -q native_ot_supply_set "$tmp/2/symbols"
+grep -q ot_write_event "$tmp/2/symbols"
+if grep -q ot_dry_event "$tmp/2/symbols"; then echo "write object has wrong callback" >&2; exit 1; fi
+if grep -q ot_write_event "$tmp/1/symbols"; then echo "dry-run has write callback" >&2; exit 1; fi
 echo 'ARM objects: normal, dry-run and isolated write mode compiled; symbol gates passed'
