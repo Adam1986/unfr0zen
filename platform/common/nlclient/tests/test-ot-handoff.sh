@@ -6,7 +6,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 ${CC:-cc} -std=c11 -Wall -Wextra -Werror -I"$dir/../src" "$dir/ot_supply_handoff_test.c" -o "$tmp/guard"
 "$tmp/guard"
-for mode in 0 1 2 3; do
+for mode in 0 1 2 3 4; do
     UNFR0ZEN_OT_SUPPLY_EXPERIMENT=$mode sh "$dir/../build.sh" "$tmp/$mode"
     readelf -Ws "$tmp/$mode/custom-screen.o" > "$tmp/$mode/symbols"
     # The in-memory linker accepts only ABS32, REL32, CALL and JUMP24
@@ -34,4 +34,9 @@ grep -q native_ot_heat_get "$tmp/3/symbols"
 grep -q native_ot_supply_get "$tmp/3/symbols"
 grep -q ot_auto_event "$tmp/3/symbols"
 if grep -Eq 'native_ot_supply_set|ot_write_event' "$tmp/3/symbols"; then echo "auto-start object can write" >&2; exit 1; fi
+grep -q native_ot_heat_get "$tmp/4/symbols"
+grep -q native_ot_supply_get "$tmp/4/symbols"
+grep -q native_ot_supply_set "$tmp/4/symbols"
+grep -q ot_managed_event "$tmp/4/symbols"
+if grep -Eq 'ot_(dry|auto|write)_event' "$tmp/4/symbols"; then echo "managed object has wrong callback" >&2; exit 1; fi
 echo 'ARM objects: normal, dry-run, isolated write and auto-start modes compiled; symbol gates passed'
