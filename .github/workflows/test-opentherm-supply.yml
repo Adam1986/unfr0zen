@@ -7,6 +7,9 @@ on:
       - feature/opentherm-supply-control
       - fix/opentherm-control-availability
       - fix/opentherm-queue-failure-diagnostics
+  pull_request:
+    branches:
+      - fix/opentherm-control-availability
   workflow_dispatch:
 
 permissions:
