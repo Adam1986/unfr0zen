@@ -107,9 +107,9 @@ impl Watch {
         fields
     }
 
-    // Conservative pilot admission only; diagnostic samples are not a
-    // real-time boiler interlock. The native heating-type guard remains.
-    pub(crate) fn pilot_idle(&self, now: i64) -> bool {
+    // Conservative control admission only; diagnostic samples are not a
+    // real-time boiler interlock. The native heating-state guard remains.
+    pub(crate) fn control_idle(&self, now: i64) -> bool {
         self.pilot_idle.lock().unwrap().is_some_and(|t| (0..=180).contains(&now.saturating_sub(t)))
     }
 
