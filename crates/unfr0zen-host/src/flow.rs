@@ -169,7 +169,7 @@ impl SetupInputs {
             .map(|value| {
                 let (min, max) = value
                     .split_once(':')
-                    .ok_or_else(|| failure("--opentherm-supply-limits expects MIN:MAX, for example 50:60"))?;
+                    .ok_or_else(|| failure("--opentherm-supply-limits expects MIN:MAX, for example 1:100"))?;
                 if max.contains(':') {
                     return Err(failure("--opentherm-supply-limits expects one MIN:MAX pair"));
                 }
@@ -485,6 +485,11 @@ mod describe_tests {
         assert_eq!(
             base.build().unwrap().opentherm_supply_limits,
             Some(nestlocal::OpenThermSupplyLimits { min: 50, max: 60 })
+        );
+        let full_range = SetupInputs { opentherm_supply_limits: Some("1:100".into()), ..base.clone() };
+        assert_eq!(
+            full_range.build().unwrap().opentherm_supply_limits,
+            Some(nestlocal::OpenThermSupplyLimits { min: 1, max: 100 })
         );
         assert_eq!(base.describe(), "--mqtt tcp://broker:1883 --opentherm-supply-limits 50:60");
         for value in ["60:50", "0:60", "50:101", "50:50", "50", "50:60:65"] {
