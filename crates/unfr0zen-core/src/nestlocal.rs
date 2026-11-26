@@ -75,8 +75,9 @@ fn regex(pattern: &str) -> Regex {
 /// A file an overlay puts in a volume: (name, mode, contents).
 pub type NamedFile = (String, u32, Vec<u8>);
 
-/// Installation-specific whole-degree limits for the managed OpenTherm control.
-/// They are explicit opt-in bounds, not a recommendation or boiler safety rating.
+/// Whole-degree bounds for the managed OpenTherm control.
+/// Setup defaults to the full Nest Pro range (1-100 C); these bounds are not a
+/// recommendation or boiler safety rating, and may be narrowed deliberately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OpenThermSupplyLimits {
     pub min: u32,
