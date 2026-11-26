@@ -25,6 +25,10 @@ pub struct Form {
     mqtt_password: String,
     mqtt_tls: bool,
     mqtt_ca: FilePick,
+    /// Optional managed OpenTherm control; disabled unless explicitly selected.
+    opentherm_supply_control: bool,
+    opentherm_supply_min: String,
+    opentherm_supply_max: String,
     /// The device name MQTT and Matter give the unit, and Home Assistant's
     /// entity ID root; empty keeps the unit's.
     device_name: String,
@@ -160,6 +164,12 @@ struct Remembered {
     mqtt_user: String,
     mqtt_tls: bool,
     mqtt_ca: Option<PathBuf>,
+    #[serde(default)]
+    opentherm_supply_control: bool,
+    #[serde(default = "default_supply_min")]
+    opentherm_supply_min: String,
+    #[serde(default = "default_supply_max")]
+    opentherm_supply_max: String,
     device_name: String,
     ha_entity_root: String,
     matter: bool,
@@ -178,6 +188,9 @@ struct Remembered {
     backplate_sim: bool,
     allow_unsigned_updates: bool,
 }
+
+fn default_supply_min() -> String { "50".into() }
+fn default_supply_max() -> String { "60".into() }
 
 impl Default for Remembered {
     fn default() -> Self {
@@ -200,6 +213,9 @@ impl Form {
             mqtt_user: self.mqtt_user.clone(),
             mqtt_tls: self.mqtt_tls,
             mqtt_ca: self.mqtt_ca.path.clone(),
+            opentherm_supply_control: self.opentherm_supply_control,
+            opentherm_supply_min: self.opentherm_supply_min.clone(),
+            opentherm_supply_max: self.opentherm_supply_max.clone(),
             device_name: self.device_name.clone(),
             ha_entity_root: self.ha_entity_root.clone(),
             matter: self.matter.on,
@@ -234,6 +250,9 @@ impl Form {
         form.mqtt_user = r.mqtt_user;
         form.mqtt_tls = r.mqtt_tls;
         form.mqtt_ca.path = r.mqtt_ca;
+        form.opentherm_supply_control = r.opentherm_supply_control;
+        form.opentherm_supply_min = r.opentherm_supply_min;
+        form.opentherm_supply_max = r.opentherm_supply_max;
         form.device_name = r.device_name;
         form.ha_entity_root = r.ha_entity_root;
         form.matter.on = r.matter;
@@ -296,6 +315,11 @@ impl Form {
             mqtt_tls: self.mqtt.on && self.mqtt_tls,
             // The CA field only shows under TLS, so it only sends under TLS.
             mqtt_ca: (self.mqtt.on && self.mqtt_tls).then(|| self.mqtt_ca.path.clone()).flatten(),
+            opentherm_supply_limits: (self.opentherm_supply_control && self.mqtt.on).then(|| {
+                let min = if self.opentherm_supply_min.trim().is_empty() { "50" } else { self.opentherm_supply_min.trim() };
+                let max = if self.opentherm_supply_max.trim().is_empty() { "60" } else { self.opentherm_supply_max.trim() };
+                format!("{min}:{max}")
+            }),
             device_name: self.names_device().then(|| text(self.device_name.trim())).flatten(),
             ha_entity_root: self.mqtt.on.then(|| text(self.ha_entity_root.trim())).flatten(),
             matter: self.matter.on,
@@ -468,6 +492,41 @@ impl Form {
                 });
             },
         );
+
+        let supply_control_supported = self.unit() == Some(Device::Diamond3);
+        if supply_control_supported {
+            crate::group(ui, crate::tr!("form.opentherm_supply.group"));
+            crate::option_card(
+                ui,
+                &mut self.opentherm_supply_control,
+                self.mqtt.on,
+                crate::tr!("form.opentherm_supply.title"),
+                crate::tr!("form.opentherm_supply.about"),
+                |ui| {
+                    ui.horizontal_top(|ui| {
+                        let half = (ui.available_width() - 14.0) / 2.0;
+                        crate::checked_field(
+                            ui,
+                            crate::tr!("form.opentherm_supply.minimum"),
+                            egui::TextEdit::singleline(&mut self.opentherm_supply_min).hint_text("50"),
+                            half,
+                            false,
+                        );
+                        crate::checked_field(
+                            ui,
+                            crate::tr!("form.opentherm_supply.maximum"),
+                            egui::TextEdit::singleline(&mut self.opentherm_supply_max).hint_text("60"),
+                            half,
+                            false,
+                        );
+                    });
+                    crate::muted_line(ui, crate::tr!("form.opentherm_supply.safety"));
+                },
+            );
+            if !self.mqtt.on {
+                crate::muted_line(ui, crate::tr!("form.opentherm_supply.needs_mqtt"));
+            }
+        }
 
         let matter_was = self.matter.on;
         crate::option_card(
@@ -745,6 +804,9 @@ impl Form {
             radio.push(crate::tr!("form.external_temperature"));
         }
         rows.push((crate::tr!("setup.other_integrations"), joined(&radio), Step::Integrations));
+        if let Some(limits) = &sent.opentherm_supply_limits {
+            rows.push((crate::tr!("form.opentherm_supply.title"), limits.clone(), Step::Integrations));
+        }
         rows.push((crate::tr!("form.block_cloud"), on_off(sent.block_cloud), Step::Features));
         if let Some(server) = &sent.ntp_server {
             rows.push((crate::tr!("setup.time_server"), server.clone(), Step::Features));
