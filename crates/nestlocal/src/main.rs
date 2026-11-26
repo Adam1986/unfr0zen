@@ -60,6 +60,27 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 /// stand-in is in place, where one is needed.
 const NLCLIENT_MAY_START: &str = "nlclient-may-start";
 
+/// Prepare the ephemeral settings UI directory before any consumer (notably
+/// managed OpenTherm supply control) validates it. /var/run is recreated at
+/// boot and the init scripts use a permissive umask, so create_dir_all alone
+/// is not sufficient.
+fn prepare_settings_runtime() -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = std::path::Path::new(settings_ui::DIR);
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o777 != 0o700 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runtime directory must be a root-owned 0700 directory",
+        ));
+    }
+    Ok(())
+}
+
 /// Matter's BLE has the chip and nlclient's own BLE is off: nlclient still
 /// loads firmware into the chip as it starts, so it must find the stand-in.
 #[cfg(target_os = "linux")]
@@ -271,8 +292,15 @@ async fn run(config: flags::Config) {
         }
     }
     // nestlocal.init holds nlclient back until here; its first commit takes
-    // the screen timeout.
-    if std::fs::create_dir_all(settings_ui::DIR).is_ok() {
+    // the screen timeout. Secure the runtime directory before watch_opentherm
+    // can load managed supply control: /var/run is recreated on every boot,
+    // and the service's default umask may otherwise leave it at 0755.
+    if let Err(e) = prepare_settings_runtime() {
+        // OpenTherm supply control fails closed unless this directory is
+        // root-owned and private. Keep telemetry running, but do not announce
+        // that nlclient may start with an insecure settings UI directory.
+        logf!("settings UI: cannot secure runtime directory: {e}");
+    } else {
         screen::republish(&store, &config.serial);
         brightness::republish(&store, &config.serial);
         let _ = std::fs::write(std::path::Path::new(settings_ui::DIR).join(NLCLIENT_MAY_START), b"");
