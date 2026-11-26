@@ -1092,6 +1092,33 @@ mod tests {
     }
 
     #[test]
+    fn managed_opentherm_control_is_off_by_default_and_only_submits_with_mqtt() {
+        assert_eq!(Form::default().inputs().opentherm_supply_limits, None);
+        let mut form = Form {
+            mqtt: Toggle { on: true, value: "tcp://broker:1883".into() },
+            last_device: Some(Device::Diamond3),
+            opentherm_supply_control: true,
+            opentherm_supply_min: "50".into(),
+            opentherm_supply_max: "60".into(),
+            ..Form::default()
+        };
+        assert_eq!(form.inputs().opentherm_supply_limits.as_deref(), Some("50:60"));
+        form.mqtt.on = false;
+        assert_eq!(form.inputs().opentherm_supply_limits, None);
+    }
+
+    #[test]
+    fn managed_opentherm_control_is_only_offered_for_the_gen3() {
+        let mqtt = || Toggle { on: true, value: "tcp://broker:1883".into() };
+        let mut gen3 = Form { mqtt: mqtt(), last_device: Some(Device::Diamond3), ..Form::default() };
+        let texts: Vec<String> = integrations_texts(&mut gen3).into_iter().map(|(t, _)| t).collect();
+        assert!(texts.contains(&crate::tr!("form.opentherm_supply.title").to_string()));
+        let mut gen2 = Form { mqtt: mqtt(), last_device: Some(Device::J49), ..Form::default() };
+        let texts: Vec<String> = integrations_texts(&mut gen2).into_iter().map(|(t, _)| t).collect();
+        assert!(!texts.contains(&crate::tr!("form.opentherm_supply.title").to_string()));
+    }
+
+    #[test]
     fn enabling_tls_keeps_the_mqtt_card_the_same_height() {
         let matter_top = |tls| {
             let mut form = Form { mqtt: Toggle { on: true, value: String::new() }, mqtt_tls: tls, ..Form::default() };
