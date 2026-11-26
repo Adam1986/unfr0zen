@@ -42,6 +42,8 @@ pub struct SetupInputs {
     pub mqtt_password: Option<String>,
     pub mqtt_tls: bool,
     pub mqtt_ca: Option<PathBuf>,
+    /// Explicit minimum:maximum whole-degree bounds for managed OpenTherm supply control.
+    pub opentherm_supply_limits: Option<String>,
     /// The name MQTT and Matter give the unit; None keeps the unit's.
     pub device_name: Option<String>,
     /// What replaces nestlocal_<serial> in the entity IDs; None keeps the unit's.
@@ -112,6 +114,7 @@ impl SetupInputs {
             ("mqtt-tls", on(self.mqtt_tls)),
             ("mqtt-ca", file(&self.mqtt_ca)),
             ("ha-entity-root", self.ha_entity_root.clone()),
+            ("opentherm-supply-limits", self.opentherm_supply_limits.clone()),
             ("matter", on(self.matter)),
             ("device-name", self.device_name.as_ref().map(|name| format!("{name:?}"))),
             ("matter-code", secret(&self.matter_code)),
@@ -159,6 +162,22 @@ impl SetupInputs {
             return Err(failure(
                 "--mqtt-user, --mqtt-password, --mqtt-tls, --mqtt-ca and --ha-entity-root need --mqtt",
             ));
+        }
+        let opentherm_supply_limits = self.opentherm_supply_limits.as_deref().map(|value| {
+            let (min, max) = value.split_once(':')
+                .ok_or_else(|| failure("--opentherm-supply-limits expects MIN:MAX, for example 50:60"))?;
+            if max.contains(':') {
+                return Err(failure("--opentherm-supply-limits expects one MIN:MAX pair"));
+            }
+            let min = min.parse::<u32>().map_err(|_| failure("OpenTherm minimum must be a whole number"))?;
+            let max = max.parse::<u32>().map_err(|_| failure("OpenTherm maximum must be a whole number"))?;
+            nestlocal::OpenThermSupplyLimits::new(min, max).map_err(|e| failure(e.to_string()))
+        }).transpose()?;
+        if opentherm_supply_limits.is_some() && self.mqtt.is_none() {
+            return Err(failure("--opentherm-supply-limits needs --mqtt"));
+        }
+        if opentherm_supply_limits.is_some() && self.device.is_some_and(|device| device != Device::Diamond3) {
+            return Err(failure("--opentherm-supply-limits is supported only on a 3rd generation Nest"));
         }
         let code = self.matter_code.as_deref().map(str::trim).filter(|c| !c.is_empty());
         let matter = self.matter || code.is_some();
@@ -217,6 +236,7 @@ impl SetupInputs {
             unsigned_updates: self.allow_unsigned_updates,
             block_cloud: self.block_cloud,
             mqtt,
+            opentherm_supply_limits,
             matter: matter
                 .then(|| Matter::from_pairing_code(code.unwrap_or(nestlocal::DEFAULT_MATTER_CODE)))
                 .transpose()?,
