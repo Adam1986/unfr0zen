@@ -586,6 +586,22 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn managed_opentherm_limits_survive_bundle_records_and_old_records_default_off() {
+        let settings = Settings {
+            opentherm_supply_limits: Some(crate::nestlocal::OpenThermSupplyLimits { min: 50, max: 60 }),
+            ..Settings::default()
+        };
+        let encoded = serde_json::to_vec(&settings).unwrap();
+        let decoded: Settings = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.opentherm_supply_limits, settings.opentherm_supply_limits);
+
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("opentherm_supply_limits");
+        let decoded: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.opentherm_supply_limits, None);
+    }
+
     use super::*;
 
     fn contents() -> (Files, BTreeMap<String, u32>) {
