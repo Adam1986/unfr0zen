@@ -69,6 +69,11 @@ if [ "${1:-}" = apply ]; then
     step apply sh crates/unfr0zen-apply/build.sh
     exit 0
 fi
+if [ "${1:-}" = screens ]; then
+    step custom-screen sh platform/common/nlclient/build.sh build
+    step managed-control-screen env UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build
+    exit 0
+fi
 # `utils/build-firmware.sh nestlocal` rebuilds nestlocal alone, carrying the
 # radio images and zbwake.ko already in build/.
 if [ "${1:-}" = nestlocal ]; then
