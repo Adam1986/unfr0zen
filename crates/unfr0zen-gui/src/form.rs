@@ -146,7 +146,7 @@ impl Form {
     /// The form the window opens with: every option off, and the review
     /// step's backup first.
     pub fn new() -> Self {
-        Form { backup_first: true, ..Form::default() }
+        Form { backup_first: true, opentherm_supply_min: "50".into(), opentherm_supply_max: "60".into(), ..Form::default() }
     }
 }
 
