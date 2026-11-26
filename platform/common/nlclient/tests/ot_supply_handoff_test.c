@@ -67,8 +67,8 @@ int main(void) {
 #define MANAGED(a,r) ot_apply_managed((a),(r),42,1000,&g,heat,get,set)
     assert(MANAGED(&wa,&wr).status == OT_REJECTED && g.calls == 0);
     assert(MANAGED(&a,&r).status == OT_REJECTED && g.calls == 0);
-    bad_a=ma; bad_a.lower=DEG(20);
-    assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
+    bad_r=mr; bad_r.target=DEG(49);
+    assert(MANAGED(&ma,&bad_r).status == OT_REJECTED && g.calls == 0);
     bad_a=ma; bad_a.upper=DEG(101);
     assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
     bad_a=ma; bad_a.lower=0;
