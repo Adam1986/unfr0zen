@@ -471,6 +471,38 @@ mod describe_tests {
     }
 
     #[test]
+    fn managed_opentherm_limits_require_mqtt_and_a_valid_min_max_pair() {
+        let base = SetupInputs {
+            mqtt: Some("tcp://broker:1883".into()),
+            opentherm_supply_limits: Some("50:60".into()),
+            ..SetupInputs::default()
+        };
+        assert_eq!(
+            base.build().unwrap().opentherm_supply_limits,
+            Some(nestlocal::OpenThermSupplyLimits { min: 50, max: 60 })
+        );
+        assert_eq!(
+            base.describe(),
+            "--mqtt tcp://broker:1883 --opentherm-supply-limits 50:60"
+        );
+        for value in ["60:50", "0:60", "50:101", "50:50", "50", "50:60:65"] {
+            let invalid = SetupInputs { opentherm_supply_limits: Some(value.into()), ..base.clone() };
+            assert!(invalid.build().is_err(), "accepted {value}");
+        }
+        let no_mqtt = SetupInputs {
+            mqtt: None,
+            opentherm_supply_limits: Some("50:60".into()),
+            ..SetupInputs::default()
+        };
+        assert!(no_mqtt.build().unwrap_err().to_string().contains("needs --mqtt"));
+        let wrong_device = SetupInputs {
+            device: Some(Device::J49),
+            ..base
+        };
+        assert!(wrong_device.build().is_err(), "the generation restriction is checked during setup");
+    }
+
+    #[test]
     fn the_boiler_option_needs_a_radio_nestlocal_holds() {
         let alone = SetupInputs { wwn_boiler: true, ..SetupInputs::default() };
         assert!(alone.build().err().unwrap().to_string().contains("--wwn-boiler"));
