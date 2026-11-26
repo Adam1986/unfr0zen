@@ -228,13 +228,18 @@ pub(crate) struct SupplyControl {
     seen: AtomicBool,
     run: Mutex<Run>,
 }
-fn native_stage_reason_for_test(stage: u32) -> Option<&'static str> {
-    match stage {
-        11 => Some("rejected_no_native_client"),
-        12 => Some("rejected_handler_allocation_failed"),
-        13 => Some("rejected_event_allocation_failed"),
-        20 => Some("rejected_screen_initialisation_guard"),
-        111 | 112 | 113 | 120 => Some("pre_dispatch_rejection_ack_write_failed"),
+fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
+    match (outcome, stage) {
+        (Outcome::Rejected, 11) => Some("rejected_no_native_client"),
+        (Outcome::Rejected, 12) => Some("rejected_handler_allocation_failed"),
+        (Outcome::Rejected, 13) => Some("rejected_event_allocation_failed"),
+        (Outcome::Rejected, 20) => Some("rejected_screen_initialisation_guard"),
+        (Outcome::Uncertain, 1) => Some("native_callback_not_acknowledged"),
+        (Outcome::Uncertain, 2) => Some("native_callback_started_no_ack"),
+        (Outcome::Uncertain, 3) => Some("native_validation_or_setter_no_ack"),
+        (Outcome::Uncertain, 4) => Some("native_ack_write_or_publication_failed"),
+        (Outcome::Uncertain, 111 | 112 | 113 | 120) =>
+            Some("pre_dispatch_rejection_ack_write_failed"),
         _ => None,
     }
 }
@@ -336,13 +341,13 @@ impl SupplyControl {
         crate::logf!("OpenTherm supply control: published {before} -> {target} C, token {token}");
         Ok(())
     }
-    fn native_stage_reason(&self, pid: u32) -> Option<&'static str> {
+    fn native_stage_reason(&self, pid: u32, outcome: Outcome) -> Option<&'static str> {
         let text = fs::read_to_string(self.dir.join("ot-managed.stage")).ok()?;
         let mut fields = text.split_whitespace();
         if fields.next()?.parse::<u32>().ok()? != pid { return None; }
         let stage = fields.next()?.parse::<u32>().ok()?;
         if fields.next().is_some() { return None; }
-        native_stage_reason_for_test(stage)
+        stage_reason_for_code(outcome, stage)
     }
 
     pub(crate) fn poll(&self) {
@@ -350,7 +355,7 @@ impl SupplyControl {
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
-        let failure = self.native_stage_reason(active.tx.generation.pid);
+        let failure = self.native_stage_reason(active.tx.generation.pid, outcome);
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
@@ -486,12 +491,17 @@ mod tests {
     }
     #[test]
     fn native_stage_reasons_are_specific_and_unknown_values_stay_unclassified() {
-        assert_eq!(native_stage_reason_for_test(11), Some("rejected_no_native_client"));
-        assert_eq!(native_stage_reason_for_test(12), Some("rejected_handler_allocation_failed"));
-        assert_eq!(native_stage_reason_for_test(13), Some("rejected_event_allocation_failed"));
-        assert_eq!(native_stage_reason_for_test(20), Some("rejected_screen_initialisation_guard"));
-        assert_eq!(native_stage_reason_for_test(120), Some("pre_dispatch_rejection_ack_write_failed"));
-        assert_eq!(native_stage_reason_for_test(4), None);
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,11), Some("rejected_no_native_client"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,12), Some("rejected_handler_allocation_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,13), Some("rejected_event_allocation_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,20), Some("rejected_screen_initialisation_guard"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,120), Some("pre_dispatch_rejection_ack_write_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,1), Some("native_callback_not_acknowledged"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,2), Some("native_callback_started_no_ack"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,3), Some("native_validation_or_setter_no_ack"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,4), Some("native_ack_write_or_publication_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Confirmed,4), None);
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,4), None);
     }
 
     #[test]
