@@ -209,6 +209,11 @@ struct Active {
     tx: Transaction,
     started: Instant,
 }
+struct Ready {
+    generation: Generation,
+    now: u32,
+    before: u32,
+}
 struct Run {
     active: Option<Active>,
     status: &'static str,
@@ -223,6 +228,17 @@ pub(crate) struct SupplyControl {
     seen: AtomicBool,
     run: Mutex<Run>,
 }
+fn native_stage_reason_for_test(stage: u32) -> Option<&'static str> {
+    match stage {
+        11 => Some("rejected_no_native_client"),
+        12 => Some("rejected_handler_allocation_failed"),
+        13 => Some("rejected_event_allocation_failed"),
+        20 => Some("rejected_screen_initialisation_guard"),
+        111 | 112 | 113 | 120 => Some("pre_dispatch_rejection_ack_write_failed"),
+        _ => None,
+    }
+}
+
 impl SupplyControl {
     pub(crate) fn load(settings: PathBuf) -> Option<Self> {
         let limits = read_limits(Path::new(OPT_IN))?;
@@ -235,42 +251,68 @@ impl SupplyControl {
     pub(crate) fn limits(&self) -> (u32,u32) { (self.limits.min,self.limits.max) }
     pub(crate) fn discovered(&self) -> bool { self.seen.load(Ordering::Relaxed) }
     pub(crate) fn active(&self) -> bool { self.run.lock().unwrap().active.is_some() }
-    fn worker(&self, t: u32) -> Option<Generation> {
-        if read_limits(Path::new(OPT_IN)) != Some(self.limits) { return None; }
-        if exists(Path::new("/var/run/unfr0zen-screen.attempt")) { return None; }
-        let bytes = fs::read(self.dir.join(READY)).ok()?;
-        if bytes.len() != 16 { return None; }
-        let pid = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-        let (g, started) = generation(pid)?;
-        if current_generation() != Some(g) || !managed_worker_ready(&bytes,g,t)
-            || u32::from_le_bytes(bytes[8..12].try_into().ok()?) < started { return None; }
+    fn worker(&self, t: u32) -> Result<Generation, &'static str> {
+        if exists(Path::new("/var/run/unfr0zen-screen.attempt")) {
+            return Err("screen_initialisation_in_progress");
+        }
+        let bytes = fs::read(self.dir.join(READY)).map_err(|_| "native_worker_heartbeat_missing")?;
+        if bytes.len() != 16 { return Err("native_worker_heartbeat_malformed"); }
+        let word = |i: usize| u32::from_le_bytes(bytes[i*4..i*4+4].try_into().unwrap());
+        if word(0) != 0x31525457 { return Err("native_worker_heartbeat_magic_mismatch"); }
+        let pid = word(1);
+        if pid <= 1 { return Err("native_worker_heartbeat_pid_invalid"); }
+        let (g, started) = generation(pid).ok_or("nlclient_process_not_valid")?;
+        let current = current_generation().ok_or("nlclient_process_missing_or_ambiguous")?;
+        if current != g { return Err("nlclient_process_generation_mismatch"); }
+        if word(3) != 4 { return Err("native_worker_mode_not_managed"); }
+        if word(2) == 0 { return Err("native_worker_heartbeat_timestamp_invalid"); }
+        let age = t.checked_sub(word(2)).ok_or("native_worker_heartbeat_in_future")?;
+        if age > 6 { return Err("native_worker_heartbeat_stale"); }
+        if word(2) < started { return Err("native_worker_heartbeat_predates_process"); }
+        if !managed_worker_ready(&bytes,g,t) { return Err("native_worker_not_ready"); }
         self.seen.store(true,Ordering::Relaxed);
-        Some(g)
+        Ok(g)
     }
     // Native event readback is authoritative for the current setting. The
     // persisted settings.config value may lag a successful native setter.
     fn before(&self, watch: &crate::opentherm::Watch) -> Option<u32> {
         observed_baseline(self.limits, watch.shown().get("opentherm_max_supply_temperature")?.as_f64()?)
     }
-    fn available(&self, watch: &crate::opentherm::Watch) -> bool {
-        let Some(t) = now() else { return false; };
-        self.worker(t).is_some() && ![LOCK,ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n)))
-            && self.before(watch).is_some()
+    fn readiness(&self, watch: &crate::opentherm::Watch) -> Result<Ready, &'static str> {
+        if read_limits(Path::new(OPT_IN)) != Some(self.limits) {
+            return Err("installation_limits_missing_or_changed");
+        }
+        if exists(&self.dir.join(LOCK)) {
+            return Err("previous_command_requires_review");
+        }
+        if exists(&self.dir.join(ARM)) || exists(&self.dir.join(REQUEST)) {
+            return Err("previous_command_record_present");
+        }
+        let t = now().ok_or("thermostat_clock_unavailable")?;
+        let generation = self.worker(t)?;
+        let before = self.before(watch).ok_or("native_supply_readback_missing_or_outside_limits")?;
+        Ok(Ready { generation, now: t, before })
     }
-    pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool) {
-        let available = self.available(watch);
+    pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool,&'static str) {
+        let readiness = self.readiness(watch);
+        let (ready, reason) = match readiness {
+            Ok(_) => (true, "ready"),
+            Err(reason) => (false, reason),
+        };
         let run = self.run.lock().unwrap();
         let status = if run.active.is_none() && exists(&self.dir.join(LOCK)) { "review_required" } else { run.status };
-        (available,status,self.discovered())
+        let reason = if run.active.is_some() { "command_in_progress" } else { reason };
+        (ready,status,self.discovered(),reason)
     }
     pub(crate) fn submit(&self, arg: &str, watch: &crate::opentherm::Watch) -> Result<(),String> {
         let mut run = self.run.lock().unwrap();
         let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
-        if run.active.is_some() || !self.available(watch) { return Err("native supply control not ready or previous command unresolved".into()); }
-        let before = self.before(watch).ok_or("saved and observed supply differ")?;
+        if run.active.is_some() { return Err("command_in_progress".into()); }
+        let ready = self.readiness(watch).map_err(str::to_owned)?;
+        let before = ready.before;
         if before == target { return Ok(()); }
-        let t = now().ok_or("invalid clock")?;
-        let g = self.worker(t).ok_or("native worker not ready")?;
+        let t = ready.now;
+        let g = ready.generation;
         let mut random = [0u8;4];
         fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random)).map_err(|e| e.to_string())?;
         let token = u32::from_le_bytes(random);
@@ -294,16 +336,26 @@ impl SupplyControl {
         crate::logf!("OpenTherm supply control: published {before} -> {target} C, token {token}");
         Ok(())
     }
+    fn native_stage_reason(&self, pid: u32) -> Option<&'static str> {
+        let text = fs::read_to_string(self.dir.join("ot-managed.stage")).ok()?;
+        let mut fields = text.split_whitespace();
+        if fields.next()?.parse::<u32>().ok()? != pid { return None; }
+        let stage = fields.next()?.parse::<u32>().ok()?;
+        if fields.next().is_some() { return None; }
+        native_stage_reason_for_test(stage)
+    }
+
     pub(crate) fn poll(&self) {
         let mut run = self.run.lock().unwrap();
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
+        let failure = self.native_stage_reason(active.tx.generation.pid);
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
-            Outcome::Rejected => "rejected",
-            Outcome::Uncertain => "review_required",
+            Outcome::Rejected => failure.unwrap_or("rejected"),
+            Outcome::Uncertain => failure.unwrap_or("review_required"),
         };
         if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
@@ -423,12 +475,25 @@ mod tests {
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(0,55,55))),Outcome::Rejected);
         let mut t = trial();
+        let pre_dispatch = encode([ACK_MAGIC,42,77,0,0,0]);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&pre_dispatch)),Outcome::Rejected);
+        let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(3,55,55))),Outcome::Uncertain);
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,55))),Outcome::Uncertain);
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,54,50))),Outcome::Uncertain);
     }
+    #[test]
+    fn native_stage_reasons_are_specific_and_unknown_values_stay_unclassified() {
+        assert_eq!(native_stage_reason_for_test(11), Some("rejected_no_native_client"));
+        assert_eq!(native_stage_reason_for_test(12), Some("rejected_handler_allocation_failed"));
+        assert_eq!(native_stage_reason_for_test(13), Some("rejected_event_allocation_failed"));
+        assert_eq!(native_stage_reason_for_test(20), Some("rejected_screen_initialisation_guard"));
+        assert_eq!(native_stage_reason_for_test(120), Some("pre_dispatch_rejection_ack_write_failed"));
+        assert_eq!(native_stage_reason_for_test(4), None);
+    }
+
     #[test]
     fn timeouts_and_wrong_ack_are_terminal_or_wait_only_for_native_ack() {
         let mut t = trial();

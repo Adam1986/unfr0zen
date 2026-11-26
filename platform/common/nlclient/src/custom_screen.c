@@ -519,17 +519,23 @@ static int light_display(struct wake_handler *handler, void *event) {
     native_delete(handler);
     return RESULT_LIGHT_DISPLAY;
 }
-static void queue_handler(void *globals, int (*handle)(struct wake_handler *, void *)) {
+enum {
+    QUEUE_SUBMITTED = 0,
+    QUEUE_NO_CLIENT = 1,
+    QUEUE_NO_HANDLER = 2,
+    QUEUE_NO_EVENT = 3,
+};
+static int queue_handler(void *globals, int (*handle)(struct wake_handler *, void *)) {
     void *client = stock_client(globals);
     if (!client)
-        return;
+        return QUEUE_NO_CLIENT;
     struct wake_handler *handler = native_new(sizeof(*handler));
     if (!handler)
-        return;
+        return QUEUE_NO_HANDLER;
     void *event = native_new(EVENT_SIZE);
     if (!event) {
         native_delete(handler);
-        return;
+        return QUEUE_NO_EVENT;
     }
     /* Its vtable is its own handle field: slot 0 is the handler. */
     handler->vtable = &handler->handle;
@@ -538,10 +544,16 @@ static void queue_handler(void *globals, int (*handle)(struct wake_handler *, vo
     native_activity_ctor(event);
     native_activity_init(event, EVENT_ACTIVITY, 0);
     /* nlClient inherits nlEventQueue. Its main thread dispatches the handler
-     * and applies the returned UI result before releasing the event. */
-    native_enqueue(client, event, handler);
+     * and applies the returned UI result before releasing the event.
+     *
+     * Do not interpret Enqueue's return value: the imported C++ ABI symbol
+     * does not encode its return type, and no verified success convention is
+     * available here. The correlated native ACK remains the only evidence
+     * that this callback actually ran. */
+    (void)native_enqueue(client, event, handler);
+    return QUEUE_SUBMITTED;
 }
-static void wake_display(void *globals) { queue_handler(globals, light_display); }
+static void wake_display(void *globals) { (void)queue_handler(globals, light_display); }
 /* Seconds a wake request (display.request, its expiry as a u32) stays
  * current. */
 #define WAKE_EXPIRY 10
@@ -865,6 +877,40 @@ static int ot_read_record(const char *path, void *record, unsigned int size) {
     unsigned int tail = native_fread(&extra, 1, 1, file);
     return native_fclose(file) == 0 && n == size && tail == 0;
 }
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+static int ot_write_ack(const struct ot_ack *ack) {
+    void *file = native_fopen(OT_COMMAND "ack.tmp", "wb");
+    if (!file) return 0;
+    unsigned int n = native_fwrite(ack, 1, sizeof(*ack), file);
+    if (native_fclose(file) != 0 || n != sizeof(*ack)) return 0;
+    return rename_setting(OT_COMMAND "ack.tmp", OT_COMMAND "ack") == 0;
+}
+/* Only use this when the setter is known not to have been invoked. The
+ * rejection ACK is transaction-correlated, but deliberately carries no
+ * temperature readback: it is evidence of pre-dispatch rejection only. */
+static int ot_write_pre_dispatch_rejection(const struct ot_request *request, const struct ot_arm *arm, u32 stage) {
+    u32 pid = (u32)native_getpid();
+    if (request->magic != OT_MANAGED_REQ_MAGIC || request->pid != pid || !request->token ||
+        arm->magic != OT_MANAGED_ARM_MAGIC || arm->pid != pid || arm->token != request->token)
+        return 0;
+    struct ot_ack ack = ot_pre_dispatch_rejection(pid, request->token);
+    write_numbers(OT_COMMAND "stage", pid, stage, 1);
+    if (!ot_write_ack(&ack)) {
+        write_numbers(OT_COMMAND "stage", pid, stage + 100, 1);
+        return 0;
+    }
+    return 1;
+}
+static void ot_reject_unqueued(unsigned int failure) {
+    struct ot_request request;
+    struct ot_arm arm;
+    if (!ot_read_record(OT_COMMAND "taken", &request, sizeof(request))) return;
+    if (rename_setting(OT_COMMAND "arm", OT_COMMAND "arm.taken") ||
+        !ot_read_record(OT_COMMAND "arm.taken", &arm, sizeof(arm))) return;
+    /* No queue call was made: the native setter definitely did not run. */
+    (void)ot_write_pre_dispatch_rejection(&request, &arm, 10 + failure);
+}
+#endif
 static void ot_supply_claimed(void *globals) {
     if (!globals) return;
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 2, 1);
@@ -873,7 +919,15 @@ static void ot_supply_claimed(void *globals) {
     if (!ot_read_record(OT_COMMAND "taken", &request, sizeof(request))) return;
     if (rename_setting(OT_COMMAND "arm", OT_COMMAND "arm.taken") ||
         !ot_read_record(OT_COMMAND "arm.taken", &arm, sizeof(arm))) return;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    if (attempt_pending()) {
+        /* Both records are claimed and the setter is still untouched. */
+        (void)ot_write_pre_dispatch_rejection(&request, &arm, 20);
+        return;
+    }
+#else
     if (attempt_pending()) return;
+#endif
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 3, 1);
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
     struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
@@ -907,7 +961,15 @@ static int OT_EVENT_HANDLER(struct wake_handler *handler, void *event) {
 static void OT_POLL(void *globals) {
     if (!globals || rename_setting(OT_COMMAND "request", OT_COMMAND "taken")) return;
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 1, 1);
-    queue_handler(globals, OT_EVENT_HANDLER);
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    int queued = queue_handler(globals, OT_EVENT_HANDLER);
+    if (queued != QUEUE_SUBMITTED) {
+        /* No callback was enqueued, so this command can be rejected safely. */
+        ot_reject_unqueued((unsigned int)queued);
+    }
+#else
+    (void)queue_handler(globals, OT_EVENT_HANDLER);
+#endif
 }
 #endif
 int custom_device_commit(void *bucket) {

@@ -51,6 +51,11 @@ int main(void) {
     g.heat=1; g.supply=DEG(54);
     assert(WRITE(&wa,&wr,42,1000).status==OT_REJECTED);
     assert(g.calls==0);
+    struct ot_ack pre_dispatch = ot_pre_dispatch_rejection(42, 99);
+    assert(pre_dispatch.magic == OT_ACK_MAGIC && pre_dispatch.pid == 42
+        && pre_dispatch.token == 99 && pre_dispatch.status == OT_REJECTED
+        && pre_dispatch.before == pre_dispatch.after);
+
     g.supply=DEG(55);
     struct ot_ack written=WRITE(&wa,&wr,42,1000);
     assert(written.status==OT_SETTER_RETURNED && written.before==DEG(55)
