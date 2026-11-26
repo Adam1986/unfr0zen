@@ -80,13 +80,16 @@ fn build_firmware(root: &Path) {
         root.join("Cargo.lock"),
     ];
     let apply = [root.join("crates/unfr0zen-apply"), root.join("crates/unfr0zen-core"), root.join("Cargo.lock")];
-    for path in nestlocal.iter().chain(&apply) {
+    let screens = [root.join("platform/common/nlclient"), root.join("utils/build-firmware.sh")];
+    for path in nestlocal.iter().chain(&apply).chain(&screens) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     let nestlocal_stale = || stale(root, "build/nestlocal-armv7", &nestlocal);
     let apply_stale = || stale(root, "build/unfr0zen-apply-armv7", &apply);
+    let screens_stale = || stale(root, "build/custom-screen.o", &screens)
+        || stale(root, "build/managed-custom-screen.o", &screens);
     if firmware_missing(root).is_empty()
-        && (cfg!(windows) || env::var_os("CI").is_some() || !(nestlocal_stale() || apply_stale()))
+        && (cfg!(windows) || env::var_os("CI").is_some() || !(nestlocal_stale() || apply_stale() || screens_stale()))
     {
         return;
     }
@@ -116,6 +119,13 @@ fn build_firmware(root: &Path) {
             assert!(
                 !apply_stale(),
                 "utils/build-firmware.sh apply left build/unfr0zen-apply-armv7 older than its sources"
+            );
+        }
+        if screens_stale() {
+            run_firmware_build(root, Some("screens"));
+            assert!(
+                !screens_stale(),
+                "utils/build-firmware.sh screens left native screen objects older than their sources"
             );
         }
     }
