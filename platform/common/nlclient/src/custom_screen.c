@@ -847,8 +847,8 @@ extern uint32_t native_ot_supply_get(void *);
 extern void native_ot_supply_set(void *, uint32_t);
 /* Existing keeper/main-thread queue, proven by the V4 native dry-run.
  * Claim both files before touching native state. Never retry a taken request.
- * The optional experimental object is accepted by the builder only for the
- * exact reviewed stock ELF. No MQTT producer is enabled. */
+ * The managed-control object is accepted by the builder only for the
+ * exact reviewed stock ELF. The MQTT producer is separately opt-in. */
 /* Separate files from the manual V4/V5/V6 trials. No managed producer
  * is enabled yet. The producer must serialize transactions and never
  * replace a claimed record or automatically retry an uncertain write. */
