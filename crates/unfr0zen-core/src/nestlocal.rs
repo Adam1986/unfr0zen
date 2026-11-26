@@ -650,6 +650,7 @@ mod tests {
     #[test]
     fn managed_opentherm_limits_are_explicit_and_written_minimum_first() {
         assert_eq!(OpenThermSupplyLimits::new(50, 60).unwrap().as_file_contents(), b"50 60\n");
+        assert_eq!(OpenThermSupplyLimits::new(1, 100).unwrap().as_file_contents(), b"1 100\n");
         assert!(OpenThermSupplyLimits::new(0, 60).is_err());
         assert!(OpenThermSupplyLimits::new(60, 50).is_err());
         assert!(OpenThermSupplyLimits::new(50, 101).is_err());
