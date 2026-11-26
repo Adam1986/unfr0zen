@@ -164,7 +164,7 @@
   "form.opentherm_supply.maximum": "Maximum allowed (°C)",
   "form.opentherm_supply.minimum": "Minimum allowed (°C)",
   "form.opentherm_supply.needs_mqtt": "Enable MQTT first to use this control.",
-  "form.opentherm_supply.safety": "Choose limits permitted by your boiler and heating-system documentation or installer. The Nest menu range is not a safety recommendation. This option is off by default.",
+  "form.opentherm_supply.safety": "The default control preserves the Nest Pro Setup range of 1–100°C. Choose a value suitable for your boiler and heating system using its documentation or installer. This option is off by default and does not change the setting until commanded.",
   "form.opentherm_supply.title": "Managed supply temperature control",
   "form.password_hide": "Hide the password",
   "form.password_show": "Show the password",
