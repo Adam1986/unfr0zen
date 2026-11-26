@@ -679,10 +679,11 @@ impl Bridge {
         if self.opentherm_enabled(dev) {
             shown.extend(self.opentherm.shown());
             if let Some(control) = self.supply_control.get() {
-                let (ready,status,_) = control.snapshot(&self.opentherm);
+                let (ready,status,_,reason) = control.snapshot(&self.opentherm);
                 // Availability follows native-worker readiness, not burner activity.
                 shown.insert("opentherm_supply_write_ready".into(), ready.into());
                 shown.insert("opentherm_supply_write_status".into(), status.into());
+                shown.insert("opentherm_supply_write_ready_reason".into(), reason.into());
                 shown.insert(crate::opentherm_supply::CONTROL.into(),
                     shown.get("opentherm_max_supply_temperature").cloned().unwrap_or(Value::Null));
             }
@@ -1284,6 +1285,10 @@ impl Bridge {
                     "value_template" => tmpl("opentherm_supply_write_status"),
                     "entity_category" => "diagnostic",
                 });
+                add("sensor", "opentherm_supply_write_ready_reason", "Supply Temperature Write Readiness", fields! {
+                    "value_template" => tmpl("opentherm_supply_write_ready_reason"),
+                    "entity_category" => "diagnostic",
+                });
             }
             if crate::opentherm::dhw_temperature_supported(dev) {
                 let mut c = available("hot_water_temperature");
@@ -1365,7 +1370,8 @@ impl Bridge {
                 ("switch", "radiant_control_enabled"), ("number", "true_radiant_max_duration"),
                 ("sensor", "next_scheduled_setpoint"), ("sensor", "next_scheduled_temperature"),
                 ("sensor", "predicted_heating_start"), ("sensor", "predicted_preheating_duration"),
-                ("number", crate::opentherm_supply::CONTROL), ("sensor", "opentherm_supply_write_status")] {
+                ("number", crate::opentherm_supply::CONTROL), ("sensor", "opentherm_supply_write_status"),
+                ("sensor", "opentherm_supply_write_ready_reason")] {
                 let topic = format!("{}/{component}/{id}/{key}/config", self.discovery);
                 if !configs.contains_key(&topic) { self.publish(&topic, true, b""); }
             }

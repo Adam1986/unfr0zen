@@ -17,6 +17,12 @@ enum { OT_REJECTED = 0, OT_VALIDATED = 1, OT_SETTER_RETURNED = 2, OT_READBACK_MI
 _Static_assert(sizeof(struct ot_arm) == 24 && sizeof(struct ot_request) == 24 && sizeof(struct ot_ack) == 24,
                "OpenTherm record ABI");
 static inline int ot_whole(uint32_t v) { return v && v <= OT_MAX && !(v & (OT_FIXED - 1)); }
+/* A correlated rejection for paths that prove the setter was never called.
+ * Zero readback words are intentional and must not be treated as telemetry. */
+static inline struct ot_ack ot_pre_dispatch_rejection(uint32_t pid, uint32_t token) {
+    struct ot_ack ack = {OT_ACK_MAGIC, pid, token, OT_REJECTED, 0, 0};
+    return ack;
+}
 static inline int ot_live(uint32_t expires, uint32_t now) {
     return now && expires >= now && expires - now <= OT_TTL;
 }

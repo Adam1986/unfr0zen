@@ -6,6 +6,7 @@ on:
       - feature/opentherm-supply-temperature
       - feature/opentherm-supply-control
       - fix/opentherm-control-availability
+      - fix/opentherm-queue-failure-diagnostics
   workflow_dispatch:
 
 permissions:

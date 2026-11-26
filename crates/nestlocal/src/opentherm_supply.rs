@@ -187,6 +187,36 @@ fn current_generation() -> Option<Generation> {
 }
 fn exists(path: &Path) -> bool { path.try_exists().unwrap_or(true) }
 
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+// The request filename is the native worker's only dispatch trigger. If it
+// is absent, publication never reached the setter; it is then safe to remove
+// a partial ARM and the lock. If it exists (or cannot be inspected), retain
+// everything for manual review.
+fn cleanup_unpublished(dir: &Path) -> Result<(), String> {
+    let request = dir.join(REQUEST);
+    if exists(&request) {
+        return Err("native request is visible; refusing to clear transaction markers".into());
+    }
+    for path in [
+        dir.join(ARM),
+        dir.join(format!("{ARM}.partial")),
+        dir.join(format!("{REQUEST}.partial")),
+    ] {
+        remove_if_present(&path)?;
+    }
+    if exists(&request) {
+        return Err("native request appeared during cleanup; retaining transaction lock".into());
+    }
+    remove_if_present(&dir.join(LOCK))
+}
+
 // Never replace a pending command. A private, exclusively created file is
 // linked into its final name atomically. Both paths are on the same tmpfs.
 fn publish_once(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
@@ -209,6 +239,11 @@ struct Active {
     tx: Transaction,
     started: Instant,
 }
+struct Ready {
+    generation: Generation,
+    now: u32,
+    before: u32,
+}
 struct Run {
     active: Option<Active>,
     status: &'static str,
@@ -223,6 +258,31 @@ pub(crate) struct SupplyControl {
     seen: AtomicBool,
     run: Mutex<Run>,
 }
+fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
+    match (outcome, stage) {
+        (Outcome::Rejected, 11) => Some("rejected_no_native_client"),
+        (Outcome::Rejected, 12) => Some("rejected_handler_allocation_failed"),
+        (Outcome::Rejected, 13) => Some("rejected_event_allocation_failed"),
+        (Outcome::Rejected, 20) => Some("rejected_screen_initialisation_guard"),
+        (Outcome::Uncertain, 1) => Some("native_callback_not_acknowledged"),
+        (Outcome::Uncertain, 2) => Some("native_callback_started_no_ack"),
+        (Outcome::Uncertain, 3) => Some("native_validation_or_setter_no_ack"),
+        (Outcome::Uncertain, 4) => Some("native_callback_reached_ack_stage_but_confirmation_uncertain"),
+        (Outcome::Uncertain, 111 | 112 | 113 | 120) =>
+            Some("pre_dispatch_rejection_ack_write_failed"),
+        _ => None,
+    }
+}
+
+fn stage_reason_for_record(text: &str, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
+    let mut fields = text.split_whitespace();
+    if fields.next()?.parse::<u32>().ok()? != pid { return None; }
+    if fields.next()?.parse::<u32>().ok()? != token { return None; }
+    let stage = fields.next()?.parse::<u32>().ok()?;
+    if fields.next().is_some() { return None; }
+    stage_reason_for_code(outcome, stage)
+}
+
 impl SupplyControl {
     pub(crate) fn load(settings: PathBuf) -> Option<Self> {
         let limits = read_limits(Path::new(OPT_IN))?;
@@ -235,42 +295,81 @@ impl SupplyControl {
     pub(crate) fn limits(&self) -> (u32,u32) { (self.limits.min,self.limits.max) }
     pub(crate) fn discovered(&self) -> bool { self.seen.load(Ordering::Relaxed) }
     pub(crate) fn active(&self) -> bool { self.run.lock().unwrap().active.is_some() }
-    fn worker(&self, t: u32) -> Option<Generation> {
-        if read_limits(Path::new(OPT_IN)) != Some(self.limits) { return None; }
-        if exists(Path::new("/var/run/unfr0zen-screen.attempt")) { return None; }
-        let bytes = fs::read(self.dir.join(READY)).ok()?;
-        if bytes.len() != 16 { return None; }
-        let pid = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-        let (g, started) = generation(pid)?;
-        if current_generation() != Some(g) || !managed_worker_ready(&bytes,g,t)
-            || u32::from_le_bytes(bytes[8..12].try_into().ok()?) < started { return None; }
+    fn worker(&self, t: u32) -> Result<Generation, &'static str> {
+        if exists(Path::new("/var/run/unfr0zen-screen.attempt")) {
+            return Err("screen_initialisation_in_progress");
+        }
+        let bytes = fs::read(self.dir.join(READY)).map_err(|_| "native_worker_heartbeat_missing")?;
+        if bytes.len() != 16 { return Err("native_worker_heartbeat_malformed"); }
+        let word = |i: usize| u32::from_le_bytes(bytes[i*4..i*4+4].try_into().unwrap());
+        if word(0) != 0x31525457 { return Err("native_worker_heartbeat_magic_mismatch"); }
+        let pid = word(1);
+        if pid <= 1 { return Err("native_worker_heartbeat_pid_invalid"); }
+        let (g, started) = generation(pid).ok_or("nlclient_process_not_valid")?;
+        let current = current_generation().ok_or("nlclient_process_missing_or_ambiguous")?;
+        if current != g { return Err("nlclient_process_generation_mismatch"); }
+        if word(3) != 4 { return Err("native_worker_mode_not_managed"); }
+        if word(2) == 0 { return Err("native_worker_heartbeat_timestamp_invalid"); }
+        let age = t.checked_sub(word(2)).ok_or("native_worker_heartbeat_in_future")?;
+        if age > 6 { return Err("native_worker_heartbeat_stale"); }
+        if word(2) < started { return Err("native_worker_heartbeat_predates_process"); }
+        if !managed_worker_ready(&bytes,g,t) { return Err("native_worker_not_ready"); }
         self.seen.store(true,Ordering::Relaxed);
-        Some(g)
+        Ok(g)
     }
     // Native event readback is authoritative for the current setting. The
     // persisted settings.config value may lag a successful native setter.
     fn before(&self, watch: &crate::opentherm::Watch) -> Option<u32> {
         observed_baseline(self.limits, watch.shown().get("opentherm_max_supply_temperature")?.as_f64()?)
     }
-    fn available(&self, watch: &crate::opentherm::Watch) -> bool {
-        let Some(t) = now() else { return false; };
-        self.worker(t).is_some() && ![LOCK,ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n)))
-            && self.before(watch).is_some()
+    fn readiness(&self, watch: &crate::opentherm::Watch) -> Result<Ready, &'static str> {
+        if read_limits(Path::new(OPT_IN)) != Some(self.limits) {
+            return Err("installation_limits_missing_or_changed");
+        }
+        if exists(&self.dir.join(LOCK)) {
+            return Err("previous_command_requires_review");
+        }
+        if exists(&self.dir.join(ARM)) || exists(&self.dir.join(REQUEST)) {
+            return Err("previous_command_record_present");
+        }
+        let t = now().ok_or("thermostat_clock_unavailable")?;
+        let generation = self.worker(t)?;
+        let before = self.before(watch).ok_or("native_supply_readback_missing_or_outside_limits")?;
+        Ok(Ready { generation, now: t, before })
     }
-    pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool) {
-        let available = self.available(watch);
+    pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool,&'static str) {
+        let readiness = self.readiness(watch);
+        let (ready, reason) = match readiness {
+            Ok(_) => (true, "ready"),
+            Err(reason) => (false, reason),
+        };
         let run = self.run.lock().unwrap();
         let status = if run.active.is_none() && exists(&self.dir.join(LOCK)) { "review_required" } else { run.status };
-        (available,status,self.discovered())
+        let reason = if run.active.is_some() { "command_in_progress" } else { reason };
+        (ready,status,self.discovered(),reason)
     }
+    fn publication_failed(&self, run: &mut Run, error: String) -> Result<(),String> {
+        match cleanup_unpublished(&self.dir) {
+            Ok(()) => {
+                run.status = "publication_failed_no_native_dispatch";
+                Err(error)
+            }
+            Err(cleanup) => {
+                run.status = "review_required";
+                Err(format!("{error}; safe cleanup failed: {cleanup}"))
+            }
+        }
+    }
+
     pub(crate) fn submit(&self, arg: &str, watch: &crate::opentherm::Watch) -> Result<(),String> {
         let mut run = self.run.lock().unwrap();
         let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
-        if run.active.is_some() || !self.available(watch) { return Err("native supply control not ready or previous command unresolved".into()); }
-        let before = self.before(watch).ok_or("saved and observed supply differ")?;
+        if run.active.is_some() { return Err("command_in_progress".into()); }
+        let ready = self.readiness(watch).map_err(str::to_owned)?;
+        let before = ready.before;
         if before == target { return Ok(()); }
-        let t = now().ok_or("invalid clock")?;
-        let g = self.worker(t).ok_or("native worker not ready")?;
+        let t = ready.now;
+        let g = ready.generation;
         let mut random = [0u8;4];
         fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random)).map_err(|e| e.to_string())?;
         let token = u32::from_le_bytes(random);
@@ -281,29 +380,37 @@ impl SupplyControl {
         // The exclusive marker is established before either record. Even
         // a partial publication leaves a lock requiring manual review.
         let lock = self.dir.join(LOCK);
-        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(lock).map_err(|e| e.to_string())?;
-        file.write_all(&request).map_err(|e| e.to_string())?;
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&lock).map_err(|e| e.to_string())?;
+        if let Err(error) = file.write_all(&request) {
+            drop(file);
+            return self.publication_failed(&mut run, format!("cannot write in-flight marker: {error}"));
+        }
         drop(file);
         run.status = "publishing";
-        if let Err(e) = publish_once(&self.dir,ARM,&arm).and_then(|_| publish_once(&self.dir,REQUEST,&request)) {
-            run.status = "review_required";
-            return Err(format!("native publication uncertain: {e}"));
+        if let Err(error) = publish_once(&self.dir,ARM,&arm).and_then(|_| publish_once(&self.dir,REQUEST,&request)) {
+            return self.publication_failed(&mut run, format!("native publication failed: {error}"));
         }
         run.active = Some(Active { tx, started:Instant::now() });
         run.status = "awaiting_native";
         crate::logf!("OpenTherm supply control: published {before} -> {target} C, token {token}");
         Ok(())
     }
+    fn native_stage_reason(&self, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
+        let text = fs::read_to_string(self.dir.join("ot-managed.stage")).ok()?;
+        stage_reason_for_record(&text, pid, token, outcome)
+    }
+
     pub(crate) fn poll(&self) {
         let mut run = self.run.lock().unwrap();
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
+        let failure = self.native_stage_reason(active.tx.generation.pid, active.tx.token, outcome);
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
-            Outcome::Rejected => "rejected",
-            Outcome::Uncertain => "review_required",
+            Outcome::Rejected => failure.unwrap_or("rejected"),
+            Outcome::Uncertain => failure.unwrap_or("review_required"),
         };
         if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
@@ -347,6 +454,31 @@ mod tests {
         assert!(!dir.join(format!("{ARM}.partial")).exists());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn unpublished_cleanup_removes_only_records_without_a_request_trigger() {
+        let dir = std::env::temp_dir().join(format!("ot-unpublished-{}-{:?}",std::process::id(),std::thread::current().id()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join(LOCK), b"lock").unwrap();
+        fs::write(dir.join(ARM), b"arm").unwrap();
+        fs::write(dir.join(format!("{ARM}.partial")), b"partial-arm").unwrap();
+        fs::write(dir.join(format!("{REQUEST}.partial")), b"partial-request").unwrap();
+        cleanup_unpublished(&dir).unwrap();
+        for name in [LOCK,ARM,REQUEST] {
+            assert!(!dir.join(name).exists(), "{name} should be absent after safe cleanup");
+        }
+        assert!(!dir.join(format!("{ARM}.partial")).exists());
+        assert!(!dir.join(format!("{REQUEST}.partial")).exists());
+
+        fs::write(dir.join(LOCK), b"lock").unwrap();
+        fs::write(dir.join(ARM), b"arm").unwrap();
+        fs::write(dir.join(REQUEST), b"request").unwrap();
+        assert!(cleanup_unpublished(&dir).is_err());
+        assert!(dir.join(LOCK).exists());
+        assert!(dir.join(ARM).exists());
+        assert!(dir.join(REQUEST).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn explicit_control_limits_parser_has_no_default() {
         assert_eq!(parse_limits("50 55"),Limits::new(50,55));
@@ -423,12 +555,36 @@ mod tests {
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(0,55,55))),Outcome::Rejected);
         let mut t = trial();
+        let pre_dispatch = encode([ACK_MAGIC,42,77,0,0,0]);
+        assert_eq!(t.observe(Some(GEN),secs(2),Some(&pre_dispatch)),Outcome::Rejected);
+        let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(3,55,55))),Outcome::Uncertain);
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,55,55))),Outcome::Uncertain);
         let mut t = trial();
         assert_eq!(t.observe(Some(GEN),secs(2),Some(&ack(2,54,50))),Outcome::Uncertain);
     }
+    #[test]
+    fn native_stage_reasons_are_specific_and_unknown_values_stay_unclassified() {
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,11), Some("rejected_no_native_client"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,12), Some("rejected_handler_allocation_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,13), Some("rejected_event_allocation_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,20), Some("rejected_screen_initialisation_guard"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,120), Some("pre_dispatch_rejection_ack_write_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,1), Some("native_callback_not_acknowledged"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,2), Some("native_callback_started_no_ack"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,3), Some("native_validation_or_setter_no_ack"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,4),
+            Some("native_callback_reached_ack_stage_but_confirmation_uncertain"));
+        assert_eq!(stage_reason_for_code(Outcome::Confirmed,4), None);
+        assert_eq!(stage_reason_for_code(Outcome::Rejected,4), None);
+        assert_eq!(stage_reason_for_record("42 77 11", 42, 77, Outcome::Rejected),
+            Some("rejected_no_native_client"));
+        assert_eq!(stage_reason_for_record("42 78 11", 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record("42 77 11 trailing", 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record("42 11", 42, 77, Outcome::Rejected), None);
+    }
+
     #[test]
     fn timeouts_and_wrong_ack_are_terminal_or_wait_only_for_native_ack() {
         let mut t = trial();
