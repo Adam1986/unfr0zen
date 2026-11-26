@@ -36,7 +36,7 @@ const DOOM_WAD_SHA256: &str = "1d7d43be501e67d927e415e0b8f3e29c3bf33075e85972181
 
 /// What the app cannot be built without. The kernel and x-loader are left out:
 /// without Docker the firmware build goes on without them.
-const REQUIRED: [&str; 24] = [
+const REQUIRED: [&str; 25] = [
     "rom-stage.imx",
     "boot-wrapper.bin",
     "u-boot-recovery.bin",
