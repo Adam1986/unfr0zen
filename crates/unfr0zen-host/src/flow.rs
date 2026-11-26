@@ -163,16 +163,21 @@ impl SetupInputs {
                 "--mqtt-user, --mqtt-password, --mqtt-tls, --mqtt-ca and --ha-entity-root need --mqtt",
             ));
         }
-        let opentherm_supply_limits = self.opentherm_supply_limits.as_deref().map(|value| {
-            let (min, max) = value.split_once(':')
-                .ok_or_else(|| failure("--opentherm-supply-limits expects MIN:MAX, for example 50:60"))?;
-            if max.contains(':') {
-                return Err(failure("--opentherm-supply-limits expects one MIN:MAX pair"));
-            }
-            let min = min.parse::<u32>().map_err(|_| failure("OpenTherm minimum must be a whole number"))?;
-            let max = max.parse::<u32>().map_err(|_| failure("OpenTherm maximum must be a whole number"))?;
-            nestlocal::OpenThermSupplyLimits::new(min, max).map_err(|e| failure(e.to_string()))
-        }).transpose()?;
+        let opentherm_supply_limits = self
+            .opentherm_supply_limits
+            .as_deref()
+            .map(|value| {
+                let (min, max) = value
+                    .split_once(':')
+                    .ok_or_else(|| failure("--opentherm-supply-limits expects MIN:MAX, for example 50:60"))?;
+                if max.contains(':') {
+                    return Err(failure("--opentherm-supply-limits expects one MIN:MAX pair"));
+                }
+                let min = min.parse::<u32>().map_err(|_| failure("OpenTherm minimum must be a whole number"))?;
+                let max = max.parse::<u32>().map_err(|_| failure("OpenTherm maximum must be a whole number"))?;
+                nestlocal::OpenThermSupplyLimits::new(min, max).map_err(|e| failure(e.to_string()))
+            })
+            .transpose()?;
         if opentherm_supply_limits.is_some() && self.mqtt.is_none() {
             return Err(failure("--opentherm-supply-limits needs --mqtt"));
         }
@@ -481,24 +486,15 @@ mod describe_tests {
             base.build().unwrap().opentherm_supply_limits,
             Some(nestlocal::OpenThermSupplyLimits { min: 50, max: 60 })
         );
-        assert_eq!(
-            base.describe(),
-            "--mqtt tcp://broker:1883 --opentherm-supply-limits 50:60"
-        );
+        assert_eq!(base.describe(), "--mqtt tcp://broker:1883 --opentherm-supply-limits 50:60");
         for value in ["60:50", "0:60", "50:101", "50:50", "50", "50:60:65"] {
             let invalid = SetupInputs { opentherm_supply_limits: Some(value.into()), ..base.clone() };
             assert!(invalid.build().is_err(), "accepted {value}");
         }
-        let no_mqtt = SetupInputs {
-            mqtt: None,
-            opentherm_supply_limits: Some("50:60".into()),
-            ..SetupInputs::default()
-        };
+        let no_mqtt =
+            SetupInputs { mqtt: None, opentherm_supply_limits: Some("50:60".into()), ..SetupInputs::default() };
         assert!(no_mqtt.build().unwrap_err().to_string().contains("needs --mqtt"));
-        let wrong_device = SetupInputs {
-            device: Some(Device::J49),
-            ..base
-        };
+        let wrong_device = SetupInputs { device: Some(Device::J49), ..base };
         assert!(wrong_device.build().is_err(), "the generation restriction is checked during setup");
     }
 
