@@ -86,8 +86,8 @@ fn build_firmware(root: &Path) {
     }
     let nestlocal_stale = || stale(root, "build/nestlocal-armv7", &nestlocal);
     let apply_stale = || stale(root, "build/unfr0zen-apply-armv7", &apply);
-    let screens_stale = || stale(root, "build/custom-screen.o", &screens)
-        || stale(root, "build/managed-custom-screen.o", &screens);
+    let screens_stale =
+        || stale(root, "build/custom-screen.o", &screens) || stale(root, "build/managed-custom-screen.o", &screens);
     if firmware_missing(root).is_empty()
         && (cfg!(windows) || env::var_os("CI").is_some() || !(nestlocal_stale() || apply_stale() || screens_stale()))
     {
