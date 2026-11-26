@@ -146,7 +146,12 @@ impl Form {
     /// The form the window opens with: every option off, and the review
     /// step's backup first.
     pub fn new() -> Self {
-        Form { backup_first: true, opentherm_supply_min: "50".into(), opentherm_supply_max: "60".into(), ..Form::default() }
+        Form {
+            backup_first: true,
+            opentherm_supply_min: "50".into(),
+            opentherm_supply_max: "60".into(),
+            ..Form::default()
+        }
     }
 }
 
@@ -189,8 +194,12 @@ struct Remembered {
     allow_unsigned_updates: bool,
 }
 
-fn default_supply_min() -> String { "50".into() }
-fn default_supply_max() -> String { "60".into() }
+fn default_supply_min() -> String {
+    "50".into()
+}
+fn default_supply_max() -> String {
+    "60".into()
+}
 
 impl Default for Remembered {
     fn default() -> Self {
@@ -316,8 +325,10 @@ impl Form {
             // The CA field only shows under TLS, so it only sends under TLS.
             mqtt_ca: (self.mqtt.on && self.mqtt_tls).then(|| self.mqtt_ca.path.clone()).flatten(),
             opentherm_supply_limits: (self.opentherm_supply_control && self.mqtt.on).then(|| {
-                let min = if self.opentherm_supply_min.trim().is_empty() { "50" } else { self.opentherm_supply_min.trim() };
-                let max = if self.opentherm_supply_max.trim().is_empty() { "60" } else { self.opentherm_supply_max.trim() };
+                let min =
+                    if self.opentherm_supply_min.trim().is_empty() { "50" } else { self.opentherm_supply_min.trim() };
+                let max =
+                    if self.opentherm_supply_max.trim().is_empty() { "60" } else { self.opentherm_supply_max.trim() };
                 format!("{min}:{max}")
             }),
             device_name: self.names_device().then(|| text(self.device_name.trim())).flatten(),
