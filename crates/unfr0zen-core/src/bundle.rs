@@ -385,6 +385,9 @@ pub struct Settings {
     pub backplate_sim: bool,
     pub block_cloud: bool,
     pub mqtt: Option<MqttSettings>,
+    /// Explicit managed OpenTherm supply-control envelope; absent keeps write control disabled.
+    #[serde(default)]
+    pub opentherm_supply_limits: Option<crate::nestlocal::OpenThermSupplyLimits>,
     pub matter: Option<MatterSettings>,
     pub thread: bool,
     pub zigbee: bool,
@@ -455,6 +458,7 @@ impl Settings {
                 ca: mqtt.ca.as_deref().map(|ca| STANDARD.encode(ca)),
                 entity_root: mqtt.entity_root.clone(),
             }),
+            opentherm_supply_limits: options.opentherm_supply_limits,
             matter: options.matter.map(|m| MatterSettings { passcode: m.passcode, discriminator: m.discriminator }),
             thread: options.thread.is_some(),
             zigbee: options.zigbee,
@@ -507,6 +511,7 @@ impl Settings {
                 })
                 .transpose()?,
             matter,
+            opentherm_supply_limits: self.opentherm_supply_limits,
             wake_filter: if matter.is_some() || self.ssh {
                 bundle.take(WAKE_FILTER).map_or_else(|| device(format!("bundle: no {WAKE_FILTER}")), Ok)?
             } else {
