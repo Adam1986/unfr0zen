@@ -7,6 +7,7 @@ on:
       - feature/opentherm-support
       - feature/opentherm-support-v055
       - feature/opentherm-supply-temperature
+      - feature/opentherm-supply-control
 
 permissions:
   contents: read
@@ -100,11 +101,11 @@ jobs:
           cargo test --locked -p nestlocal --bin nestlocal update::tests
           cargo test --locked -p nestlocal --bin nestlocal schedule
 
-      - name: Validate managed pilot command guards
-        if: github.ref_name == 'feature/opentherm-supply-temperature'
+      - name: Validate managed supply-control command guards
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control"]'), github.ref_name)
         run: |
           sh platform/common/nlclient/tests/test-ot-handoff.sh
-          cargo test --locked -p nestlocal --bin nestlocal experimental_supply_temperature_commands_fail_closed
+          cargo test --locked -p nestlocal --bin nestlocal supply_temperature_commands_fail_closed
           cargo test --locked -p nestlocal --bin nestlocal opentherm_retained_commands_leave_weather_and_readback_intact
 
       - name: Build Nestlocal
@@ -134,7 +135,7 @@ jobs:
             > build/nestlocal-armv7.sha256
 
       - name: Package matching managed native object and build metadata
-        if: github.ref_name == 'feature/opentherm-supply-temperature'
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control"]'), github.ref_name)
         run: |
           UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build/native
           cp build/native/custom-screen.o build/managed-custom-screen.o
@@ -144,15 +145,15 @@ jobs:
           arm-linux-gnueabihf-readelf -l build/nestlocal-armv7 > build/nestlocal-program-headers.txt
           arm-linux-gnueabihf-readelf -V build/nestlocal-armv7 > build/nestlocal-version-info.txt
           git rev-parse HEAD > build/source-commit.txt
-          (cd build && sha256sum nestlocal-armv7 managed-custom-screen.o > pilot-sha256.txt)
+          (cd build && sha256sum nestlocal-armv7 managed-custom-screen.o > managed-control-sha256.txt)
           # No stock firmware, patched firmware, installer, OTA or signing keys.
           # This artifact alone does not enable the opt-in control.
 
-      - name: Upload matching managed pilot components
-        if: github.ref_name == 'feature/opentherm-supply-temperature'
+      - name: Upload matching managed control components
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control"]'), github.ref_name)
         uses: actions/upload-artifact@v4
         with:
-          name: opentherm-managed-pilot-armv7
+          name: opentherm-managed-control-armv7
           path: |
             build/nestlocal-armv7
             build/managed-custom-screen.o
@@ -160,7 +161,7 @@ jobs:
             build/nestlocal-program-headers.txt
             build/nestlocal-version-info.txt
             build/source-commit.txt
-            build/pilot-sha256.txt
+            build/managed-control-sha256.txt
           if-no-files-found: error
           retention-days: 14
 
