@@ -512,10 +512,9 @@ impl Bridge {
                 if !self.live.as_ref().is_some_and(|l| l.alive()) { return Err("thermostat is offline".to_string()); }
                 let dev = self.store.get(&format!("device.{}", self.serial)).ok_or("no device bucket")?;
                 if !self.opentherm_enabled(&dev.value) { return Err("not OpenTherm".to_string()); }
-                let sh = self.store.get(&format!("shared.{}", self.serial)).ok_or("no shared bucket")?;
-                if sh.value.get("hvac_heater_state").and_then(Value::as_bool) == Some(true) {
-                    return Err("heating active: control requires idle diagnostics".to_string());
-                }
+                // This changes the maximum supply-temperature setting, not heat demand.
+                // Pro Setup permits changing the same setting while the boiler is firing,
+                // so burner state must not reject an otherwise valid managed transaction.
                 let arg = std::str::from_utf8(payload).map_err(|_| "invalid command encoding")?;
                 control.submit(arg, &self.opentherm)
             })();
@@ -681,8 +680,8 @@ impl Bridge {
             shown.extend(self.opentherm.shown());
             if let Some(control) = self.supply_control.get() {
                 let (ready,status,_) = control.snapshot(&self.opentherm);
-                let heating = sh.get("hvac_heater_state").and_then(Value::as_bool) == Some(true);
-                shown.insert("opentherm_supply_write_ready".into(), (ready && !heating).into());
+                // Availability follows native-worker readiness, not burner activity.
+                shown.insert("opentherm_supply_write_ready".into(), ready.into());
                 shown.insert("opentherm_supply_write_status".into(), status.into());
                 shown.insert(crate::opentherm_supply::CONTROL.into(),
                     shown.get("opentherm_max_supply_temperature").cloned().unwrap_or(Value::Null));
