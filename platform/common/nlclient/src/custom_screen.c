@@ -878,6 +878,14 @@ static int ot_read_record(const char *path, void *record, unsigned int size) {
     return native_fclose(file) == 0 && n == size && tail == 0;
 }
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+static int ot_write_stage(u32 pid, u32 token, u32 stage) {
+    u32 record[3] = {pid, token, stage};
+    void *file = native_fopen(OT_COMMAND "stage.tmp", "wb");
+    if (!file) return 0;
+    unsigned int n = native_fwrite(record, 1, sizeof(record), file);
+    if (native_fclose(file) != 0 || n != sizeof(record)) return 0;
+    return rename_setting(OT_COMMAND "stage.tmp", OT_COMMAND "stage") == 0;
+}
 static int ot_write_ack(const struct ot_ack *ack) {
     void *file = native_fopen(OT_COMMAND "ack.tmp", "wb");
     if (!file) return 0;
@@ -894,9 +902,9 @@ static int ot_write_pre_dispatch_rejection(const struct ot_request *request, con
         arm->magic != OT_MANAGED_ARM_MAGIC || arm->pid != pid || arm->token != request->token)
         return 0;
     struct ot_ack ack = ot_pre_dispatch_rejection(pid, request->token);
-    write_numbers(OT_COMMAND "stage", pid, stage, 1);
+    (void)ot_write_stage(pid, request->token, stage);
     if (!ot_write_ack(&ack)) {
-        write_numbers(OT_COMMAND "stage", pid, stage + 100, 1);
+        (void)ot_write_stage(pid, request->token, stage + 100);
         return 0;
     }
     return 1;
@@ -913,12 +921,16 @@ static void ot_reject_unqueued(unsigned int failure) {
 #endif
 static void ot_supply_claimed(void *globals) {
     if (!globals) return;
-    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 2, 1);
     struct ot_request request;
     struct ot_arm arm;
     if (!ot_read_record(OT_COMMAND "taken", &request, sizeof(request))) return;
     if (rename_setting(OT_COMMAND "arm", OT_COMMAND "arm.taken") ||
         !ot_read_record(OT_COMMAND "arm.taken", &arm, sizeof(arm))) return;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    (void)ot_write_stage((u32)native_getpid(), request.token, 2);
+#else
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 2, 1);
+#endif
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
     if (attempt_pending()) {
         /* Both records are claimed and the setter is still untouched. */
@@ -928,7 +940,11 @@ static void ot_supply_claimed(void *globals) {
 #else
     if (attempt_pending()) return;
 #endif
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    (void)ot_write_stage((u32)native_getpid(), request.token, 3);
+#else
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 3, 1);
+#endif
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 1 || UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 3
     struct ot_ack ack = ot_apply(&arm, &request, (uint32_t)native_getpid(), native_time(0), globals,
                                   native_ot_heat_get, native_ot_supply_get, 0, 0);
@@ -941,7 +957,11 @@ static void ot_supply_claimed(void *globals) {
                                   native_ot_heat_get, native_ot_supply_get, native_ot_supply_set);
 #endif
 #endif
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    (void)ot_write_stage((u32)native_getpid(), request.token, 4);
+#else
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 4, 1);
+#endif
     void *file = native_fopen(OT_COMMAND "ack.tmp", "wb");
     if (!file) return;
     unsigned int n = native_fwrite(&ack, 1, sizeof(ack), file);
@@ -962,6 +982,12 @@ static void OT_POLL(void *globals) {
     if (!globals || rename_setting(OT_COMMAND "request", OT_COMMAND "taken")) return;
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 1, 1);
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    struct ot_request submitted;
+    if (!ot_read_record(OT_COMMAND "taken", &submitted, sizeof(submitted)) ||
+        submitted.magic != OT_MANAGED_REQ_MAGIC || submitted.pid != (u32)native_getpid() ||
+        !submitted.token)
+        return;
+    (void)ot_write_stage((u32)native_getpid(), submitted.token, 1);
     int queued = queue_handler(globals, OT_EVENT_HANDLER);
     if (queued != QUEUE_SUBMITTED) {
         /* No callback was enqueued, so this command can be rejected safely. */

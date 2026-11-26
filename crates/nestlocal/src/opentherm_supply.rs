@@ -244,6 +244,15 @@ fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
     }
 }
 
+fn stage_reason_for_record(text: &str, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
+    let mut fields = text.split_whitespace();
+    if fields.next()?.parse::<u32>().ok()? != pid { return None; }
+    if fields.next()?.parse::<u32>().ok()? != token { return None; }
+    let stage = fields.next()?.parse::<u32>().ok()?;
+    if fields.next().is_some() { return None; }
+    stage_reason_for_code(outcome, stage)
+}
+
 impl SupplyControl {
     pub(crate) fn load(settings: PathBuf) -> Option<Self> {
         let limits = read_limits(Path::new(OPT_IN))?;
@@ -341,13 +350,9 @@ impl SupplyControl {
         crate::logf!("OpenTherm supply control: published {before} -> {target} C, token {token}");
         Ok(())
     }
-    fn native_stage_reason(&self, pid: u32, outcome: Outcome) -> Option<&'static str> {
+    fn native_stage_reason(&self, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
         let text = fs::read_to_string(self.dir.join("ot-managed.stage")).ok()?;
-        let mut fields = text.split_whitespace();
-        if fields.next()?.parse::<u32>().ok()? != pid { return None; }
-        let stage = fields.next()?.parse::<u32>().ok()?;
-        if fields.next().is_some() { return None; }
-        stage_reason_for_code(outcome, stage)
+        stage_reason_for_record(&text, pid, token, outcome)
     }
 
     pub(crate) fn poll(&self) {
@@ -355,7 +360,7 @@ impl SupplyControl {
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
-        let failure = self.native_stage_reason(active.tx.generation.pid, outcome);
+        let failure = self.native_stage_reason(active.tx.generation.pid, active.tx.token, outcome);
         run.status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
@@ -502,6 +507,11 @@ mod tests {
         assert_eq!(stage_reason_for_code(Outcome::Uncertain,4), Some("native_ack_write_or_publication_failed"));
         assert_eq!(stage_reason_for_code(Outcome::Confirmed,4), None);
         assert_eq!(stage_reason_for_code(Outcome::Rejected,4), None);
+        assert_eq!(stage_reason_for_record("42 77 11", 42, 77, Outcome::Rejected),
+            Some("rejected_no_native_client"));
+        assert_eq!(stage_reason_for_record("42 78 11", 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record("42 77 11 trailing", 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record("42 11", 42, 77, Outcome::Rejected), None);
     }
 
     #[test]
