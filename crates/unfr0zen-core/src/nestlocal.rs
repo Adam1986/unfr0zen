@@ -88,7 +88,7 @@ impl OpenThermSupplyLimits {
         Ok(Self { min, max })
     }
     pub fn as_file_contents(self) -> Vec<u8> {
-        format!("{} {}\\n", self.min, self.max).into_bytes()
+        format!("{} {}\n", self.min, self.max).into_bytes()
     }
 }
 
