@@ -92,11 +92,12 @@ const CONNMAND_ORIGINAL: &str = "etc/unfr0zen/connmand.original";
 const CHECK_URLS: (&[u8], &[u8]) =
     (b"http://clients3.google.com/generate_204\0", b"http://cp.cloudflare.com/generate_204\0\0\0");
 /// A password, CA or device name from an earlier build must not outlive it.
-const STALE_SECRETS: [&str; 4] = [
+const STALE_SECRETS: [&str; 5] = [
     nestlocal::PASSWORD_FILE,
     nestlocal::CA_FILE,
     nestlocal::NAME_FILE,
     nestlocal::OPENTHERM_SUPPLY_CONTROL_FILE,
+    nestlocal::LEGACY_OPENTHERM_SUPPLY_PILOT_FILE,
 ];
 
 /// Host copies of the volume's files: name, (contents, mode).
