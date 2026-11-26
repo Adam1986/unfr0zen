@@ -2403,6 +2403,28 @@ mod tests {
     }
 
     #[test]
+    fn managed_opentherm_control_installs_private_limits_and_removes_them_when_disabled() {
+        let pki = nestlocal::generate_pki().unwrap();
+        let mqtt = Mqtt { url: "tcp://b:1883".into(), ..Mqtt::default() };
+        let limits = nestlocal::OpenThermSupplyLimits::new(50, 60).unwrap();
+        let mut volume = nestlocal_unit(Some(&pki));
+        set_up(
+            &mut volume,
+            &Options {
+                mqtt: Some(mqtt.clone()),
+                opentherm_supply_limits: Some(limits),
+                ..options()
+            },
+            false,
+        ).unwrap();
+        let path = nestlocal::OPENTHERM_SUPPLY_CONTROL_FILE;
+        assert_eq!(volume.text(path), "50 60\n");
+        assert_eq!(volume.files[path].1, 0o600, "limits are root-only");
+        set_up(&mut volume, &Options { mqtt: Some(mqtt), ..options() }, false).unwrap();
+        assert!(!volume.files.contains_key(path), "disabling the feature removes its opt-in file");
+    }
+
+    #[test]
     fn wwn_boiler_is_set_from_rcs_when_asked_and_taken_back_after() {
         let pki = nestlocal::generate_pki().unwrap();
         let mut volume = nestlocal_unit(Some(&pki));
