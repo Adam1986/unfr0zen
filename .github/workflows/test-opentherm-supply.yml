@@ -1,9 +1,10 @@
-name: Test experimental OpenTherm supply control
+name: Test managed OpenTherm supply control
 
 on:
   push:
     branches:
       - feature/opentherm-supply-temperature
+      - feature/opentherm-supply-control
   workflow_dispatch:
 
 permissions:
@@ -33,8 +34,8 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-      - name: Test disabled supply temperature commands
-        run: cargo test --locked -p nestlocal --bin nestlocal experimental_supply_temperature_commands_fail_closed
+      - name: Test supply temperature command gates
+        run: cargo test --locked -p nestlocal --bin nestlocal supply_temperature_commands_fail_closed
       - name: Test MQTT packet handling and retained metadata
         run: |
           cargo test --locked -p nestlocal --bin nestlocal mqtt::tests::a_session_with_a_loopback_broker
