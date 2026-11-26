@@ -142,4 +142,6 @@ step doom sh platform/common/doom/build.sh build/doom-armv7
 # One relocatable object for every firmware build: the app links it at the
 # addresses and layouts discovered in the unit's nlclient.
 step custom-screen sh platform/common/nlclient/build.sh build
+# Keep the native write worker as a separate opt-in object: ordinary bundles use mode 0.
+step managed-control-screen env UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build
 echo "Built the ROM bootstrap, boot wrapper, recovery U-Boot, the OMAP x-loaders and flasher, the radio's firmware, zbwake.ko, nestlocal, unfr0zen-apply, Doom and the screen object under build/."
