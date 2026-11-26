@@ -16,7 +16,12 @@ mkdir -p "$1"
 ot_mode=${UNFR0ZEN_OT_SUPPLY_EXPERIMENT:-0}
 case "$ot_mode" in 0|1|2|3|4) ;; *) echo "invalid experimental OpenTherm mode" >&2; exit 2 ;; esac
 for name in custom_screen rcs_screen; do
-    case "$name" in custom_screen) output=custom-screen.o ;; rcs_screen) output=j49-rcs-screen.o ;; esac
+    case "$name" in
+        custom_screen)
+            if [ "$ot_mode" = 4 ]; then output=managed-custom-screen.o; else output=custom-screen.o; fi
+            ;;
+        rcs_screen) output=j49-rcs-screen.o ;;
+    esac
     experiment=0
     [ "$name" != custom_screen ] || experiment=$ot_mode
     clang -DUNFR0ZEN_OT_SUPPLY_EXPERIMENT="$experiment" --target=arm-linux-gnueabihf -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard \
