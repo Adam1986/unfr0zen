@@ -139,3 +139,42 @@ The previous state machine additionally required a fresh BoilerSupplySetTemp UI 
 The second supervised HA trial ran with the managed mode-4 candidate. At 21:18:38 the original nlclient PID 30698 was idle and the settings file held 50 C. The candidate services started, the managed heartbeat advanced, and the script observed a command. Its confirmation deadline expired and the supervisor restored the original V6.6 nlclient and nestlocal with hashes and Monit verified. After restoration the settings file was 3604480 (55 C), and the operator checked the physical Pro Setup display, which showed 55 C. The script outcome was therefore a false negative for the actual temperature change; this transcript did not include the native ACK words for this second trial.
 
 The pilot state machine had been waiting for the local settings file to agree after the native ACK. This is unnecessarily strict and can fail to confirm a successful setter. The revised transaction outcome is **native-confirmed** only when a correlated status-2 ACK matches the expected before/after raw values and the current process generation. It does not claim a correlated Heat Link ACK or a separate disk-sync acknowledgement. A missing ACK, rejection, mismatch or generation change remains non-success/uncertain; no retry or reverse write is added. This is a confirmation semantics change, not a native firmware change.
+
+
+## Managed supply-control implementation branch — 26 November 2026
+
+The live supervised 55 C -> 50 C Home Assistant transaction on the reviewed
+Gen 3 / 6.4-8 installation completed with a matching native status-2 ACK,
+matching before/after values, claimed ARM/request records, and a released
+in-flight marker. After the candidate was removed and original V6.6 binaries
+were restored, the saved `supplytemp` value was still 50 C and the operator
+confirmed 50 C on the physical display and in Home Assistant. This validates
+the end-to-end command path and persistence on this installation. It is not
+evidence that every temperature in the Nest's 0-100 C picker is safe for every
+boiler or heating system.
+
+The production-oriented branch `feature/opentherm-supply-control` now
+generalises mode 4's managed envelope: it remains an explicit, root-owned
+configuration, but is no longer hard-coded to 50-55 C. The file is
+`/etc/nestlocal/opentherm-supply-control`, containing exactly two whole
+degrees on one line: minimum then maximum. Both the Rust producer and native
+handler validate the configured bounds and every target against that same
+envelope. The native 1-100 C whole-degree check is only a representation
+guard, not an operating range or a default. No config file is created
+automatically, and raw or retained MQTT supply commands remain blocked.
+
+For this installation, a 50-60 C envelope is representable and covered by
+mock validation, but 60 C has not been live-tested through the native setter
+in this session. Before choosing that envelope, establish that the boiler,
+radiators/underfloor circuit, mixing valves, and other system components
+permit it. Use the boiler/system documentation and installer settings; do
+not infer a safe limit merely from the Nest picker or from room comfort
+history. Keep the live Nest at its currently verified 50 C setting until
+the production build, static/CI tests, install/rollback packaging, and
+configuration limits have been reviewed.
+
+This commit is source preparation only. It does not build, install, or
+enable the managed native object on the live thermostat. The mode-4 native
+object remains restricted by the builder to the exact reviewed stock ELF
+hash and ABI landmarks. Cold-boot readiness, full release installation,
+and an explicit 50-60 C live trial remain separate validation steps.
