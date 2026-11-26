@@ -45,6 +45,8 @@ pub const CA_FILE: &str = "etc/nestlocal/mqtt-ca.pem";
 /// The device name MQTT and Matter give the unit: a file, as the init script
 /// word-splits the options.
 pub const NAME_FILE: &str = "etc/nestlocal/device-name";
+/// Explicit root-owned limits for the optional managed OpenTherm supply control.
+pub const OPENTHERM_SUPPLY_CONTROL_FILE: &str = "etc/nestlocal/opentherm-supply-control";
 pub const RANDOM_SEED: &str = "etc/nestlocal/random-seed";
 const INIT: &[u8] = include_bytes!(concat!(env!("UNFR0ZEN_ROOT"), "/crates/nestlocal/rootfs/nestlocal.init"));
 const MONITRC: &[u8] = include_bytes!(concat!(env!("UNFR0ZEN_ROOT"), "/crates/nestlocal/rootfs/nestlocal.monitrc"));
@@ -70,6 +72,25 @@ fn regex(pattern: &str) -> Regex {
 
 /// A file an overlay puts in a volume: (name, mode, contents).
 pub type NamedFile = (String, u32, Vec<u8>);
+
+/// Installation-specific whole-degree limits for the managed OpenTherm control.
+/// They are explicit opt-in bounds, not a recommendation or boiler safety rating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpenThermSupplyLimits {
+    pub min: u32,
+    pub max: u32,
+}
+impl OpenThermSupplyLimits {
+    pub fn new(min: u32, max: u32) -> Result<Self> {
+        if min == 0 || min >= max || max > 100 {
+            return device("OpenTherm supply limits must be whole degrees with 1 <= minimum < maximum <= 100");
+        }
+        Ok(Self { min, max })
+    }
+    pub fn as_file_contents(self) -> Vec<u8> {
+        format!("{} {}\\n", self.min, self.max).into_bytes()
+    }
+}
 
 /// The broker unfr0zen --mqtt and its options name.
 #[derive(Clone, Debug, Default)]
