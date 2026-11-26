@@ -59,6 +59,7 @@ fn omap() -> (Files, BTreeMap<String, u32>) {
 
 fn diamond3() -> (Files, BTreeMap<String, u32>) {
     let mut files = common();
+    files.insert(bundle::MANAGED_SCREEN.to_string(), (0o644, assets::MANAGED_CUSTOM_SCREEN.to_vec()));
     files.extend([
         (bundle::APPLY.to_string(), (0o755, assets::apply())),
         (bundle::PRE_SETUP.to_string(), (0o755, crate::diamond3::assets::PRE_SETUP.to_vec())),
