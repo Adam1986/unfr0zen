@@ -32,6 +32,8 @@ pub const WAKE_FILTER: &str = "assets/libwakefilter.so";
 /// Preloaded into nlclient on a unit running nestlocal (setup::Options::local_cloud).
 pub const LOCAL_CLOUD: &str = "assets/liblocalcloud.so";
 pub const SCREEN: &str = "assets/custom-screen.o";
+/// The native settings screen with the opt-in managed OpenTherm supply worker.
+pub const MANAGED_SCREEN: &str = "assets/managed-custom-screen.o";
 /// The gen 2's native Sensors view helper, for the external temperature.
 pub const RCS_SCREEN: &str = "assets/j49-rcs-screen.o";
 /// Run before the setup reads the volume; failing, it stops the run with
