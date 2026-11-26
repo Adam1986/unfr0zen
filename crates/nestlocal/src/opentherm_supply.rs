@@ -237,7 +237,7 @@ fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
         (Outcome::Uncertain, 1) => Some("native_callback_not_acknowledged"),
         (Outcome::Uncertain, 2) => Some("native_callback_started_no_ack"),
         (Outcome::Uncertain, 3) => Some("native_validation_or_setter_no_ack"),
-        (Outcome::Uncertain, 4) => Some("native_ack_write_or_publication_failed"),
+        (Outcome::Uncertain, 4) => Some("native_callback_reached_ack_stage_but_confirmation_uncertain"),
         (Outcome::Uncertain, 111 | 112 | 113 | 120) =>
             Some("pre_dispatch_rejection_ack_write_failed"),
         _ => None,
@@ -504,7 +504,8 @@ mod tests {
         assert_eq!(stage_reason_for_code(Outcome::Uncertain,1), Some("native_callback_not_acknowledged"));
         assert_eq!(stage_reason_for_code(Outcome::Uncertain,2), Some("native_callback_started_no_ack"));
         assert_eq!(stage_reason_for_code(Outcome::Uncertain,3), Some("native_validation_or_setter_no_ack"));
-        assert_eq!(stage_reason_for_code(Outcome::Uncertain,4), Some("native_ack_write_or_publication_failed"));
+        assert_eq!(stage_reason_for_code(Outcome::Uncertain,4),
+            Some("native_callback_reached_ack_stage_but_confirmation_uncertain"));
         assert_eq!(stage_reason_for_code(Outcome::Confirmed,4), None);
         assert_eq!(stage_reason_for_code(Outcome::Rejected,4), None);
         assert_eq!(stage_reason_for_record("42 77 11", 42, 77, Outcome::Rejected),
