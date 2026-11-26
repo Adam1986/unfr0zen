@@ -47,6 +47,8 @@ pub const CA_FILE: &str = "etc/nestlocal/mqtt-ca.pem";
 pub const NAME_FILE: &str = "etc/nestlocal/device-name";
 /// Explicit root-owned limits for the optional managed OpenTherm supply control.
 pub const OPENTHERM_SUPPLY_CONTROL_FILE: &str = "etc/nestlocal/opentherm-supply-control";
+/// Removed on upgrade; this was the temporary supervised-trial opt-in.
+pub const LEGACY_OPENTHERM_SUPPLY_PILOT_FILE: &str = "etc/nestlocal/opentherm-supply-pilot";
 pub const RANDOM_SEED: &str = "etc/nestlocal/random-seed";
 const INIT: &[u8] = include_bytes!(concat!(env!("UNFR0ZEN_ROOT"), "/crates/nestlocal/rootfs/nestlocal.init"));
 const MONITRC: &[u8] = include_bytes!(concat!(env!("UNFR0ZEN_ROOT"), "/crates/nestlocal/rootfs/nestlocal.monitrc"));
