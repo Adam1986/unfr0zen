@@ -69,7 +69,9 @@ int main(void) {
     assert(MANAGED(&a,&r).status == OT_REJECTED && g.calls == 0);
     bad_a=ma; bad_a.lower=DEG(20);
     assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
-    bad_a=ma; bad_a.upper=DEG(60);
+    bad_a=ma; bad_a.upper=DEG(101);
+    assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
+    bad_a=ma; bad_a.lower=0;
     assert(MANAGED(&bad_a,&mr).status == OT_REJECTED && g.calls == 0);
     bad_r=mr; bad_r.target=DEG(52)+1;
     assert(MANAGED(&ma,&bad_r).status == OT_REJECTED && g.calls == 0);
@@ -81,5 +83,11 @@ int main(void) {
     assert(MANAGED(&ma,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(53));
     mr.expected=DEG(53); mr.target=DEG(55);
     assert(MANAGED(&ma,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(55) && g.calls == 3);
+    const struct ot_arm ma60 = {OT_MANAGED_ARM_MAGIC,42,124,1030,DEG(50),DEG(60)};
+    mr.pid=42; mr.token=124; mr.expires=1020; mr.expected=DEG(55); mr.target=DEG(60);
+    g.supply=DEG(55);
+    assert(MANAGED(&ma60,&mr).status == OT_SETTER_RETURNED && g.supply == DEG(60) && g.calls == 4);
+    mr.expected=DEG(60); mr.target=DEG(61);
+    assert(MANAGED(&ma60,&mr).status == OT_REJECTED && g.calls == 4);
     puts("OpenTherm handoff: all guard, isolated-write and mock setter assertions passed");
 }
