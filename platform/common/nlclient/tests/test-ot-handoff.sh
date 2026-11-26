@@ -8,10 +8,12 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror -I"$dir/../src" "$dir/ot_supply_handoff
 "$tmp/guard"
 for mode in 0 1 2 3 4; do
     UNFR0ZEN_OT_SUPPLY_EXPERIMENT=$mode sh "$dir/../build.sh" "$tmp/$mode"
-    readelf -Ws "$tmp/$mode/custom-screen.o" > "$tmp/$mode/symbols"
+    object="$tmp/$mode/custom-screen.o"
+    [ "$mode" != 4 ] || object="$tmp/$mode/managed-custom-screen.o"
+    readelf -Ws "$object" > "$tmp/$mode/symbols"
     # The in-memory linker accepts only ABS32, REL32, CALL and JUMP24
     # in the retained .text and .rodata sections; it discards EHABI.
-    readelf -Wr "$tmp/$mode/custom-screen.o" > "$tmp/$mode/relocs"
+    readelf -Wr "$object" > "$tmp/$mode/relocs"
     awk '
         /^Relocation section/ {kept=($3 ~ /^\047\.rel\.(text|rodata)/)}
         kept && $3 ~ /^R_ARM_/ && $3 !~ /^R_ARM_(ABS32|REL32|CALL|JUMP24)$/ {
