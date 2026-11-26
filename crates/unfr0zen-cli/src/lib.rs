@@ -72,6 +72,9 @@ struct Args {
     /// MQTT user name for --mqtt
     #[arg(long, help_heading = "Root filesystem options")]
     mqtt_user: Option<String>,
+    /// Explicit min:max whole-degree envelope for managed OpenTherm supply control (Diamond3 only).
+    #[arg(long, value_name = "MIN:MAX", requires = "mqtt", help_heading = "Root filesystem options")]
+    opentherm_supply_limits: Option<String>,
     /// MQTT password for --mqtt (needs --mqtt-user)
     #[arg(long, help_heading = "Root filesystem options")]
     mqtt_password: Option<String>,
@@ -197,6 +200,7 @@ impl Args {
             mqtt: self.mqtt.clone(),
             mqtt_user: self.mqtt_user.clone(),
             mqtt_password: self.mqtt_password.clone(),
+            opentherm_supply_limits: self.opentherm_supply_limits.clone(),
             mqtt_tls: self.mqtt_tls,
             mqtt_ca: self.mqtt_ca.clone(),
             device_name: self.device_name.clone(),
