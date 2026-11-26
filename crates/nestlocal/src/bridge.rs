@@ -76,7 +76,7 @@ pub struct Bridge {
     pub power: Arc<crate::power::Watch>,
     opentherm: Arc<crate::opentherm::Watch>,
     opentherm_platform: bool,
-    supply_pilot: OnceLock<crate::opentherm_supply::Pilot>,
+    supply_control: OnceLock<crate::opentherm_supply::SupplyControl>,
     prediction: Mutex<Option<crate::prediction::Sample>>,
     mqtt: OnceLock<mqtt::Client>,
     /// The unit's wakes since nestlocal started (wake.rs).
@@ -132,7 +132,7 @@ impl Bridge {
             brightness: Arc::new(crate::brightness::Watch::default()),
             power: Arc::new(crate::power::Watch::default()),
             opentherm: Arc::new(crate::opentherm::Watch::default()),
-            supply_pilot: OnceLock::new(),
+            supply_control: OnceLock::new(),
             opentherm_platform: crate::opentherm::supported_platform(nestlocal::device::current().name),
             prediction: Mutex::new(None),
             mqtt: OnceLock::new(),
@@ -291,16 +291,16 @@ impl Bridge {
         if !self.opentherm_platform { return; }
         let bridge = Arc::downgrade(self);
         let runtime = tokio::runtime::Handle::current();
-        if let Some(pilot) = crate::opentherm_supply::Pilot::load(settings.clone()) {
-            let _ = self.supply_pilot.set(pilot);
+        if let Some(control) = crate::opentherm_supply::SupplyControl::load(settings.clone()) {
+            let _ = self.supply_control.set(control);
             let bridge = Arc::downgrade(self);
             tokio::spawn(async move {
                 let mut last = None;
                 loop {
                     let Some(b) = bridge.upgrade() else { break; };
-                    let Some(pilot) = b.supply_pilot.get() else { break; };
-                    pilot.poll();
-                    let current = pilot.snapshot(&b.opentherm);
+                    let Some(control) = b.supply_control.get() else { break; };
+                    control.poll();
+                    let current = control.snapshot(&b.opentherm);
                     if last != Some(current) {
                         last = Some(current);
                         b.publish_state();
@@ -508,18 +508,18 @@ impl Bridge {
             }
         } else if topic == format!("{}/set/{}", self.base, crate::opentherm_supply::CONTROL) {
             let result = (|| {
-                let pilot = self.supply_pilot.get().ok_or("OpenTherm supply pilot not enabled")?;
+                let control = self.supply_control.get().ok_or("OpenTherm supply control not enabled")?;
                 if !self.live.as_ref().is_some_and(|l| l.alive()) { return Err("thermostat is offline".to_string()); }
                 let dev = self.store.get(&format!("device.{}", self.serial)).ok_or("no device bucket")?;
                 if !self.opentherm_enabled(&dev.value) { return Err("not OpenTherm".to_string()); }
                 let sh = self.store.get(&format!("shared.{}", self.serial)).ok_or("no shared bucket")?;
                 if sh.value.get("hvac_heater_state").and_then(Value::as_bool) == Some(true) {
-                    return Err("heating active: pilot requires idle diagnostics".to_string());
+                    return Err("heating active: control requires idle diagnostics".to_string());
                 }
                 let arg = std::str::from_utf8(payload).map_err(|_| "invalid command encoding")?;
-                pilot.submit(arg, &self.opentherm)
+                control.submit(arg, &self.opentherm)
             })();
-            if let Err(e) = result { logf!("mqtt: OpenTherm supply pilot: {e}"); }
+            if let Err(e) = result { logf!("mqtt: OpenTherm supply control: {e}"); }
             self.publish_state();
         } else if topic.starts_with(&format!("{}/set/", self.base)) {
             self.command(topic, payload);
@@ -539,7 +539,7 @@ impl Bridge {
     /// awake for now (wake.rs).
     pub fn holds_awake(&self) -> bool {
         self.mqtt.get().is_some_and(mqtt::Client::holds_awake) || self.updates.get().is_some_and(|u| u.installing())
-            || self.supply_pilot.get().is_some_and(crate::opentherm_supply::Pilot::active)
+            || self.supply_control.get().is_some_and(crate::opentherm_supply::SupplyControl::active)
     }
 
     fn publish_availability(&self, alive: bool) {
@@ -679,8 +679,8 @@ impl Bridge {
         shown.insert("wakes".into(), self.wakes.load(Ordering::Relaxed).into());
         if self.opentherm_enabled(dev) {
             shown.extend(self.opentherm.shown());
-            if let Some(pilot) = self.supply_pilot.get() {
-                let (ready,status,_) = pilot.snapshot(&self.opentherm);
+            if let Some(control) = self.supply_control.get() {
+                let (ready,status,_) = control.snapshot(&self.opentherm);
                 let heating = sh.get("hvac_heater_state").and_then(Value::as_bool) == Some(true);
                 shown.insert("opentherm_supply_write_ready".into(), (ready && !heating).into());
                 shown.insert("opentherm_supply_write_status".into(), status.into());
@@ -1263,9 +1263,9 @@ impl Bridge {
                 }
                 sensor(&mut add, key, name, unit, class, c);
             }
-            if let Some(pilot) = self.supply_pilot.get().filter(|p| p.discovered()) {
+            if let Some(control) = self.supply_control.get().filter(|p| p.discovered()) {
                 let key = crate::opentherm_supply::CONTROL;
-                let (min,max) = pilot.limits();
+                let (min,max) = control.limits();
                 let mut c = available(key);
                 c.insert("availability".into(), serde_json::json!([
                     {"topic": format!("{}/availability", self.base)},
