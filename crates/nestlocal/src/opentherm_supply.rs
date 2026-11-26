@@ -187,6 +187,36 @@ fn current_generation() -> Option<Generation> {
 }
 fn exists(path: &Path) -> bool { path.try_exists().unwrap_or(true) }
 
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+// The request filename is the native worker's only dispatch trigger. If it
+// is absent, publication never reached the setter; it is then safe to remove
+// a partial ARM and the lock. If it exists (or cannot be inspected), retain
+// everything for manual review.
+fn cleanup_unpublished(dir: &Path) -> Result<(), String> {
+    let request = dir.join(REQUEST);
+    if exists(&request) {
+        return Err("native request is visible; refusing to clear transaction markers".into());
+    }
+    for path in [
+        dir.join(ARM),
+        dir.join(format!("{ARM}.partial")),
+        dir.join(format!("{REQUEST}.partial")),
+    ] {
+        remove_if_present(&path)?;
+    }
+    if exists(&request) {
+        return Err("native request appeared during cleanup; retaining transaction lock".into());
+    }
+    remove_if_present(&dir.join(LOCK))
+}
+
 // Never replace a pending command. A private, exclusively created file is
 // linked into its final name atomically. Both paths are on the same tmpfs.
 fn publish_once(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
@@ -318,6 +348,19 @@ impl SupplyControl {
         let reason = if run.active.is_some() { "command_in_progress" } else { reason };
         (ready,status,self.discovered(),reason)
     }
+    fn publication_failed(&self, run: &mut Run, error: String) -> Result<(),String> {
+        match cleanup_unpublished(&self.dir) {
+            Ok(()) => {
+                run.status = "publication_failed_no_native_dispatch";
+                Err(error)
+            }
+            Err(cleanup) => {
+                run.status = "review_required";
+                Err(format!("{error}; safe cleanup failed: {cleanup}"))
+            }
+        }
+    }
+
     pub(crate) fn submit(&self, arg: &str, watch: &crate::opentherm::Watch) -> Result<(),String> {
         let mut run = self.run.lock().unwrap();
         let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
@@ -337,13 +380,15 @@ impl SupplyControl {
         // The exclusive marker is established before either record. Even
         // a partial publication leaves a lock requiring manual review.
         let lock = self.dir.join(LOCK);
-        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(lock).map_err(|e| e.to_string())?;
-        file.write_all(&request).map_err(|e| e.to_string())?;
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&lock).map_err(|e| e.to_string())?;
+        if let Err(error) = file.write_all(&request) {
+            drop(file);
+            return self.publication_failed(&mut run, format!("cannot write in-flight marker: {error}"));
+        }
         drop(file);
         run.status = "publishing";
-        if let Err(e) = publish_once(&self.dir,ARM,&arm).and_then(|_| publish_once(&self.dir,REQUEST,&request)) {
-            run.status = "review_required";
-            return Err(format!("native publication uncertain: {e}"));
+        if let Err(error) = publish_once(&self.dir,ARM,&arm).and_then(|_| publish_once(&self.dir,REQUEST,&request)) {
+            return self.publication_failed(&mut run, format!("native publication failed: {error}"));
         }
         run.active = Some(Active { tx, started:Instant::now() });
         run.status = "awaiting_native";
@@ -409,6 +454,31 @@ mod tests {
         assert!(!dir.join(format!("{ARM}.partial")).exists());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn unpublished_cleanup_removes_only_records_without_a_request_trigger() {
+        let dir = std::env::temp_dir().join(format!("ot-unpublished-{}-{:?}",std::process::id(),std::thread::current().id()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join(LOCK), b"lock").unwrap();
+        fs::write(dir.join(ARM), b"arm").unwrap();
+        fs::write(dir.join(format!("{ARM}.partial")), b"partial-arm").unwrap();
+        fs::write(dir.join(format!("{REQUEST}.partial")), b"partial-request").unwrap();
+        cleanup_unpublished(&dir).unwrap();
+        for name in [LOCK,ARM,REQUEST] {
+            assert!(!dir.join(name).exists(), "{name} should be absent after safe cleanup");
+        }
+        assert!(!dir.join(format!("{ARM}.partial")).exists());
+        assert!(!dir.join(format!("{REQUEST}.partial")).exists());
+
+        fs::write(dir.join(LOCK), b"lock").unwrap();
+        fs::write(dir.join(ARM), b"arm").unwrap();
+        fs::write(dir.join(REQUEST), b"request").unwrap();
+        assert!(cleanup_unpublished(&dir).is_err());
+        assert!(dir.join(LOCK).exists());
+        assert!(dir.join(ARM).exists());
+        assert!(dir.join(REQUEST).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn explicit_control_limits_parser_has_no_default() {
         assert_eq!(parse_limits("50 55"),Limits::new(50,55));
