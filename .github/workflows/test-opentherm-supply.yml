@@ -5,6 +5,7 @@ on:
     branches:
       - feature/opentherm-supply-temperature
       - feature/opentherm-supply-control
+      - fix/opentherm-control-availability
   workflow_dispatch:
 
 permissions:

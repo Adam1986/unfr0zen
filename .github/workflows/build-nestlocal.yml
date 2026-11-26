@@ -8,6 +8,7 @@ on:
       - feature/opentherm-support-v055
       - feature/opentherm-supply-temperature
       - feature/opentherm-supply-control
+      - fix/opentherm-control-availability
 
 permissions:
   contents: read

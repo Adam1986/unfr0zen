@@ -148,6 +148,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 fn now() -> Option<u32> { chrono::Utc::now().timestamp().try_into().ok() }
+fn observed_baseline(limits: Limits, observed: f64) -> Option<u32> {
+    if !observed.is_finite() || observed.fract() != 0.0 || observed < 1.0 || observed > 100.0 {
+        return None;
+    }
+    let degrees = observed as u32;
+    limits.contains(degrees).then_some(degrees)
+}
 fn parse_limits(text: &str) -> Option<Limits> {
     let mut parts = text.split_whitespace();
     let min = parts.next()?.parse().ok()?;
@@ -240,16 +247,15 @@ impl SupplyControl {
         self.seen.store(true,Ordering::Relaxed);
         Some(g)
     }
+    // Native event readback is authoritative for the current setting. The
+    // persisted settings.config value may lag a successful native setter.
     fn before(&self, watch: &crate::opentherm::Watch) -> Option<u32> {
-        let raw = saved_raw(&self.settings)?;
-        let observed = watch.shown().get("opentherm_max_supply_temperature")?.as_f64()?;
-        let degrees = raw / FIXED;
-        (self.limits.contains(degrees) && observed == degrees as f64).then_some(degrees)
+        observed_baseline(self.limits, watch.shown().get("opentherm_max_supply_temperature")?.as_f64()?)
     }
     fn available(&self, watch: &crate::opentherm::Watch) -> bool {
         let Some(t) = now() else { return false; };
         self.worker(t).is_some() && ![LOCK,ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n)))
-            && watch.control_idle(t as i64) && self.before(watch).is_some()
+            && self.before(watch).is_some()
     }
     pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool) {
         let available = self.available(watch);
@@ -321,6 +327,16 @@ mod tests {
         encode([ACK_MAGIC, 42, 77, status, before * FIXED, after * FIXED])
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
+    #[test]
+    fn baseline_uses_confirmed_native_readback_even_when_persistence_lags() {
+        let limits = Limits::new(50, 65).unwrap();
+        assert_eq!(observed_baseline(limits, 60.0), Some(60));
+        assert_eq!(observed_baseline(limits, 65.0), Some(65));
+        assert_eq!(observed_baseline(limits, 49.0), None);
+        assert_eq!(observed_baseline(limits, 66.0), None);
+        assert_eq!(observed_baseline(limits, 60.5), None);
+        assert_eq!(observed_baseline(limits, f64::NAN), None);
+    }
     #[test]
     fn control_publication_never_overwrites_a_pending_record() {
         let dir = std::env::temp_dir().join(format!("ot-control-{}-{:?}",std::process::id(),std::thread::current().id()));
