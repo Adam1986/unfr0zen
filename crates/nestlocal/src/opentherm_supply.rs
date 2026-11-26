@@ -240,16 +240,20 @@ impl SupplyControl {
         self.seen.store(true,Ordering::Relaxed);
         Some(g)
     }
+    // Native event readback is authoritative for the current setting. The
+    // persisted settings.config value may lag a successful native setter.
     fn before(&self, watch: &crate::opentherm::Watch) -> Option<u32> {
-        let raw = saved_raw(&self.settings)?;
         let observed = watch.shown().get("opentherm_max_supply_temperature")?.as_f64()?;
-        let degrees = raw / FIXED;
-        (self.limits.contains(degrees) && observed == degrees as f64).then_some(degrees)
+        if !observed.is_finite() || observed.fract() != 0.0 || observed < 1.0 || observed > 100.0 {
+            return None;
+        }
+        let degrees = observed as u32;
+        self.limits.contains(degrees).then_some(degrees)
     }
     fn available(&self, watch: &crate::opentherm::Watch) -> bool {
         let Some(t) = now() else { return false; };
         self.worker(t).is_some() && ![LOCK,ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n)))
-            && watch.control_idle(t as i64) && self.before(watch).is_some()
+            && self.before(watch).is_some()
     }
     pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool) {
         let available = self.available(watch);
