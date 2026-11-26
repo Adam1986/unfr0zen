@@ -11,7 +11,8 @@ set -eu
 }
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$1"
-# Explicit offline experiment; ordinary/release builds remain unchanged.
+# Explicit native payload mode selector. Mode 4 is the managed supply-control
+# worker; the ordinary build (mode 0) remains read-only.
 ot_mode=${UNFR0ZEN_OT_SUPPLY_EXPERIMENT:-0}
 case "$ot_mode" in 0|1|2|3|4) ;; *) echo "invalid experimental OpenTherm mode" >&2; exit 2 ;; esac
 for name in custom_screen rcs_screen; do
