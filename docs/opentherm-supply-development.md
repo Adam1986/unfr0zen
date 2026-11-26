@@ -43,7 +43,7 @@ Next: validate the observer separately before deciding whether the existing comm
 
 ## Checkpoint: low-limit heating incident and exact-image observer audit
 
-On 25 November 2026, the live Nest was in `BOILER_MODULATION / DRIFT / OFF` and logged `UnexpectedDrift` with active temperature 18.96°C, target 21.5°C and boiler setpoint 10°C. Its physical Pro Setup maximum supply temperature had been left at 20°C during earlier menu exploration. Changing only the physical setting to 50°C immediately restored heating. This is strong evidence of a low-limit operating issue, not evidence of a V6.6 software regression. The exact threshold and other operating limits are not established by this observation. Do not use the full native 0–100°C range as the writable entity's bounds or reset learned parameters. 50°C is the user's current working setting, not a universal recommended minimum.
+On 25 November 2026, the live Nest was in `BOILER_MODULATION / DRIFT / OFF` and logged `UnexpectedDrift` with active temperature 18.96°C, target 21.5°C and boiler setpoint 10°C. Its physical Pro Setup maximum supply temperature had been left at 20°C during earlier menu exploration. Changing only the physical setting to 50°C immediately restored heating. This is strong evidence of a low-limit operating issue, not evidence of a V6.6 software regression. The exact threshold and other operating limits are not established by this observation. The picker range is a user-interface capability, not a safety recommendation. The managed control now preserves the Nest Pro 1–100°C range by default, but operators must choose a setting appropriate for their installation and must not reset learned parameters. 50°C is the user's current working setting, not a universal recommended minimum.
 
 The standalone offline audit `platform/common/nlclient/tests/opentherm-supply-probe-audit.py` was executed against the supplied exact-hash installed image. It linked the 280-byte observer at the existing executable segment's end and changed only the in-memory device commit slot and two segment size words. The in-memory image SHA-256 was `1e949197385874f968a5fb1e90dfc6a2f3ff510c0c419ba381c7b122f7af12e1` using the local toolchain. Reverse edits restored the original image byte-for-byte; a one-byte modified input was refused. The audit does not save an executable or perform any installation. This separate path is not the production builder. The observer samples before the existing device commit and may be stale until another commit occurs.
 
@@ -67,7 +67,7 @@ The original screen fault marker is not proof of the earlier cause. Preserve it 
 
 1. Review native object ownership, ABI, exceptions and duplicate registration, then validate a disabled-write extension in an isolated ARM environment. Do not install a hook solely on static link evidence.
 2. Completed: preserve incoming MQTT RETAIN metadata and reject retained supply commands without disrupting retained weather inputs.
-3. Require explicit installation-specific operating limits confirmed against boiler and system documentation; no generic default.
+3. Preserve the Nest Pro 1–100°C control range by default, while making clear it is not a safety recommendation. Permit deliberate narrowing where the operator or installer has a documented system constraint.
 4. Keep all write paths disabled unless both native and bridge validation are in place; independent fresh native observation must confirm any change. A local object-store echo is not confirmation.
 5. Exercise native and Rust regressions, prove rollback and test isolated from the live boiler before controlled testing.
 
@@ -112,7 +112,7 @@ expected native value; serialise commands. Track native setter return
 separately from saved settings and published telemetry; allow delayed
 persistence. Timeout or contradictory evidence must be reported as uncertain,
 not silently retried or reversed. Never write settings.config directly.
-Do not use the representation limit of 100°C as an operating range.
+Do not present the exposed 1–100°C range as a safety recommendation; preserve user control and clearly disclose that suitable settings depend on the installation.
 
 Cold boot and warm restart readiness must be verified independently; the
 keeper PID file alone does not prove that pthread creation succeeded. A live
