@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_supply_temperature_commands_fail_closed() {
+    fn supply_temperature_commands_fail_closed() {
         let b = test_bridge();
         b.store.merge("device.S", &fields! {
             "heat_link_heat_type" => "opentherm",
