@@ -138,7 +138,7 @@ jobs:
         if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control"]'), github.ref_name)
         run: |
           UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build/native
-          cp build/native/custom-screen.o build/managed-custom-screen.o
+          cp build/native/managed-custom-screen.o build/managed-custom-screen.o
           readelf -Ws build/managed-custom-screen.o > build/managed-native-symbols.txt
           grep -q ot_managed_event build/managed-native-symbols.txt
           grep -q native_ot_supply_set build/managed-native-symbols.txt
