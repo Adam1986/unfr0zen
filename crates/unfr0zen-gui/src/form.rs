@@ -148,8 +148,8 @@ impl Form {
     pub fn new() -> Self {
         Form {
             backup_first: true,
-            opentherm_supply_min: "50".into(),
-            opentherm_supply_max: "60".into(),
+            opentherm_supply_min: "1".into(),
+            opentherm_supply_max: "100".into(),
             ..Form::default()
         }
     }
@@ -326,9 +326,9 @@ impl Form {
             mqtt_ca: (self.mqtt.on && self.mqtt_tls).then(|| self.mqtt_ca.path.clone()).flatten(),
             opentherm_supply_limits: (self.opentherm_supply_control && self.mqtt.on).then(|| {
                 let min =
-                    if self.opentherm_supply_min.trim().is_empty() { "50" } else { self.opentherm_supply_min.trim() };
+                    if self.opentherm_supply_min.trim().is_empty() { "1" } else { self.opentherm_supply_min.trim() };
                 let max =
-                    if self.opentherm_supply_max.trim().is_empty() { "60" } else { self.opentherm_supply_max.trim() };
+                    if self.opentherm_supply_max.trim().is_empty() { "100" } else { self.opentherm_supply_max.trim() };
                 format!("{min}:{max}")
             }),
             device_name: self.names_device().then(|| text(self.device_name.trim())).flatten(),
@@ -519,14 +519,14 @@ impl Form {
                         crate::checked_field(
                             ui,
                             crate::tr!("form.opentherm_supply.minimum"),
-                            egui::TextEdit::singleline(&mut self.opentherm_supply_min).hint_text("50"),
+                            egui::TextEdit::singleline(&mut self.opentherm_supply_min).hint_text("1"),
                             half,
                             false,
                         );
                         crate::checked_field(
                             ui,
                             crate::tr!("form.opentherm_supply.maximum"),
-                            egui::TextEdit::singleline(&mut self.opentherm_supply_max).hint_text("60"),
+                            egui::TextEdit::singleline(&mut self.opentherm_supply_max).hint_text("100"),
                             half,
                             false,
                         );
@@ -1105,6 +1105,11 @@ mod tests {
     #[test]
     fn managed_opentherm_control_is_off_by_default_and_only_submits_with_mqtt() {
         assert_eq!(Form::default().inputs().opentherm_supply_limits, None);
+        let mut defaults = Form::new();
+        defaults.mqtt = Toggle { on: true, value: "tcp://broker:1883".into() };
+        defaults.last_device = Some(Device::Diamond3);
+        defaults.opentherm_supply_control = true;
+        assert_eq!(defaults.inputs().opentherm_supply_limits.as_deref(), Some("1:100"));
         let mut form = Form {
             mqtt: Toggle { on: true, value: "tcp://broker:1883".into() },
             last_device: Some(Device::Diamond3),
