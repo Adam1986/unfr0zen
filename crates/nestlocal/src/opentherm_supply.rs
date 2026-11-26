@@ -13,8 +13,8 @@ const ACK_WAIT: Duration = Duration::from_secs(35);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Limits { min: u32, max: u32 }
 impl Limits {
-    // Representation bounds only: the operator must explicitly establish
-    // installation-specific limits. There is deliberately no Default.
+    // Setup defaults to the full Nest Pro Setup range (1–100 C). An operator
+    // may deliberately narrow it; these bounds are not a safety recommendation.
     pub(crate) fn new(min: u32, max: u32) -> Option<Self> {
         (min > 0 && min < max && max <= 100).then_some(Self { min, max })
     }
@@ -335,6 +335,7 @@ mod tests {
     fn explicit_control_limits_parser_has_no_default() {
         assert_eq!(parse_limits("50 55"),Limits::new(50,55));
         assert_eq!(parse_limits("50 60"),Limits::new(50,60));
+        assert_eq!(parse_limits("1 100"),Limits::new(1,100));
         for invalid in ["","50","0 60","60 50","50 101","50 55 60","55 55","50.5 55"] {
             assert_eq!(parse_limits(invalid),None);
         }
@@ -362,6 +363,11 @@ mod tests {
         assert!(Limits::new(55,50).is_none());
         assert!(Limits::new(50,101).is_none());
         let l = Limits::new(50,60).unwrap();
+        let full = Limits::new(1,100).unwrap();
+        assert_eq!(full.parse_target("1"),Some(1));
+        assert_eq!(full.parse_target("100"),Some(100));
+        assert_eq!(full.parse_target("0"),None);
+        assert!(Transaction::new(GEN,79,1000,full,50,100).is_some());
         for arg in ["NaN","inf","49","61","52.5",""] { assert_eq!(l.parse_target(arg), None); }
         assert_eq!(l.parse_target("50.0"), Some(50));
         assert_eq!(l.parse_target("60"), Some(60));
