@@ -178,3 +178,26 @@ enable the managed native object on the live thermostat. The mode-4 native
 object remains restricted by the builder to the exact reviewed stock ELF
 hash and ABI landmarks. Cold-boot readiness, full release installation,
 and an explicit 50-60 C live trial remain separate validation steps.
+
+
+### Installer integration
+
+The setup application exposes **Managed supply temperature control** only for a
+known 3rd-generation Nest. It is off by default and requires MQTT. The form
+collects an explicit minimum and maximum; the CLI equivalent is
+`--opentherm-supply-limits MIN:MAX` alongside `--mqtt`. The accepted limits
+are validated as whole degrees with `1 <= minimum < maximum <= 100`. The
+selected native screen object is packaged separately from the ordinary
+read-only screen and is chosen only when the feature is explicitly enabled.
+
+The setup overlay writes the limits to
+`/etc/nestlocal/opentherm-supply-control` as `MIN MAX\n`, owned by root with
+mode 0600. Disabling the feature removes that file, including the legacy
+`opentherm-supply-pilot` trial opt-in. Older saved setup records default to
+control disabled. The limits are carried in the setup record so managed
+updates retain the same envelope rather than silently changing it.
+
+These are implementation changes on the feature branch only. The installer,
+full desktop/CLI build, full bundle round-trip and cold-boot path still need
+CI/build validation before this can be called release-ready. No code from
+this branch has been installed on the thermostat.
