@@ -150,8 +150,8 @@ in-flight marker. After the candidate was removed and original V6.6 binaries
 were restored, the saved `supplytemp` value was still 50 C and the operator
 confirmed 50 C on the physical display and in Home Assistant. This validates
 the end-to-end command path and persistence on this installation. It is not
-evidence that every temperature in the Nest's 0-100 C picker is safe for every
-boiler or heating system.
+evidence that every temperature in the Nest Pro Setup 1-100 C range is safe
+for every boiler or heating system.
 
 The production-oriented branch `feature/opentherm-supply-control` now
 generalises mode 4's managed envelope: it remains an explicit, root-owned
@@ -159,19 +159,23 @@ configuration, but is no longer hard-coded to 50-55 C. The file is
 `/etc/nestlocal/opentherm-supply-control`, containing exactly two whole
 degrees on one line: minimum then maximum. Both the Rust producer and native
 handler validate the configured bounds and every target against that same
-envelope. The native 1-100 C whole-degree check is only a representation
-guard, not an operating range or a default. No config file is created
-automatically, and raw or retained MQTT supply commands remain blocked.
+envelope. The setup application defaults the managed control to the full Nest Pro
+Setup range of 1-100 C. This preserves the range exposed by the Nest rather
+than imposing a product-specific cap. It is not a safety recommendation:
+the operator remains responsible for choosing a setting suitable for the
+boiler and heating system. An installer may deliberately narrow the exposed
+range during setup. No config file is created automatically, and raw or
+retained MQTT supply commands remain blocked.
 
-For this installation, a 50-60 C envelope is representable and covered by
-mock validation, but 60 C has not been live-tested through the native setter
-in this session. Before choosing that envelope, establish that the boiler,
-radiators/underfloor circuit, mixing valves, and other system components
-permit it. Use the boiler/system documentation and installer settings; do
-not infer a safe limit merely from the Nest picker or from room comfort
-history. Keep the live Nest at its currently verified 50 C setting until
-the production build, static/CI tests, install/rollback packaging, and
-configuration limits have been reviewed.
+The full 1-100 C range is now exercised at its boundaries by mock tests,
+but only the 55 C -> 50 C transition has been physically validated through
+the native setter in this session. The software does not infer a safe
+operating temperature from the Nest picker. The operator must select a value
+appropriate to the boiler, radiators/underfloor circuit, mixing valves, and
+other system components, using the relevant documentation or installer.
+Keep the live Nest at its currently verified 50 C setting until the
+production build, static/CI tests, install/rollback packaging, and
+configuration behaviour have been reviewed.
 
 This commit is source preparation only. It does not build, install, or
 enable the managed native object on the live thermostat. The mode-4 native
@@ -183,10 +187,11 @@ and an explicit 50-60 C live trial remain separate validation steps.
 ### Installer integration
 
 The setup application exposes **Managed supply temperature control** only for a
-known 3rd-generation Nest. It is off by default and requires MQTT. The form
-collects an explicit minimum and maximum; the CLI equivalent is
-`--opentherm-supply-limits MIN:MAX` alongside `--mqtt`. The accepted limits
-are validated as whole degrees with `1 <= minimum < maximum <= 100`. The
+known 3rd-generation Nest. It is off by default and requires MQTT. The form defaults to the complete 1-100 C Nest Pro Setup range and allows
+an installer to narrow the exposed values if deliberately required. The CLI
+equivalent is `--opentherm-supply-limits MIN:MAX` alongside `--mqtt`; use
+`1:100` to preserve the full Nest range. Bounds are validated as whole
+degrees with `1 <= minimum < maximum <= 100`. The
 selected native screen object is packaged separately from the ordinary
 read-only screen and is chosen only when the feature is explicitly enabled.
 
