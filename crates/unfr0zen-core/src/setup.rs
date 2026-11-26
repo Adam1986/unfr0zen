@@ -525,6 +525,8 @@ pub struct Options {
     /// nlclient check for the internet at Cloudflare instead.
     pub block_cloud: bool,
     pub mqtt: Option<Mqtt>,
+    /// Explicit min/max envelope for the managed MQTT OpenTherm supply control.
+    pub opentherm_supply_limits: Option<crate::nestlocal::OpenThermSupplyLimits>,
     pub matter: Option<Matter>,
     /// The name MQTT and Matter give the unit; None keeps the unit's.
     pub device_name: Option<String>,
@@ -694,6 +696,12 @@ pub fn set_up_owned(
             name
         }
     };
+    if options.opentherm_supply_limits.is_some() && options.mqtt.is_none() {
+        return device("managed OpenTherm supply control needs MQTT");
+    }
+    if options.opentherm_supply_limits.is_some() && target != Device::Diamond3 {
+        return device("managed OpenTherm supply control is supported only on the reviewed 3rd generation");
+    }
     if options.thread.is_some() && (options.matter.is_none() || options.zigbee) {
         return device("Matter over Thread requires Matter and exclusive radio access");
     }
@@ -773,6 +781,7 @@ pub fn set_up_owned(
         || options.doom.is_some()
         || options.theme.is_some()
         || options.external_temperature
+        || options.opentherm_supply_limits.is_some()
         || turn_off
     {
         fetch(volume, &mut tree, &mut originals, &nestlocal::STOCK_FILES, true, true)?;
@@ -809,6 +818,13 @@ pub fn set_up_owned(
             nestlocal_binary,
             &pki,
         )?);
+        if let Some(limits) = options.opentherm_supply_limits {
+            overlay.as_mut().unwrap().files.push((
+                nestlocal::OPENTHERM_SUPPLY_CONTROL_FILE.into(),
+                0o600,
+                limits.as_file_contents(),
+            ));
+        }
         if let Some(thread) = options.thread.as_mut() {
             let overlay = overlay.as_mut().unwrap();
             let (_, _, line) = overlay.files.iter_mut().find(|(name, _, _)| name == nestlocal::OPTIONS).unwrap();
