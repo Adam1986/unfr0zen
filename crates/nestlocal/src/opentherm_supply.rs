@@ -1,4 +1,4 @@
-//! Managed supply-temperature lifecycle and explicitly opted-in pilot IO.
+//! Managed supply-temperature control, with explicit installation limits and one-shot native IO.
 //! Mode 4 is required; older experimental binaries cannot accept this ABI.
 //! Never turn a native setter return into an optimistic bucket update.
 use std::time::Duration;
@@ -17,11 +17,6 @@ impl Limits {
     // installation-specific limits. There is deliberately no Default.
     pub(crate) fn new(min: u32, max: u32) -> Option<Self> {
         (min > 0 && min < max && max <= 100).then_some(Self { min, max })
-    }
-    // Match native mode 4's pilot ceiling; no default or automatic opt-in.
-    pub(crate) fn pilot(min: u32, max: u32) -> Option<Self> {
-        if min < 50 || max > 55 { return None; }
-        Self::new(min, max)
     }
     pub(crate) fn parse_target(self, arg: &str) -> Option<u32> {
         let t = arg.trim().parse::<f64>().ok()?;
@@ -137,7 +132,7 @@ fn worker_ready(bytes: &[u8], generation: Generation, now: u32, mode: u32) -> bo
 
 
 pub(crate) const CONTROL: &str = "opentherm_max_supply_temperature_control";
-const OPT_IN: &str = "/etc/nestlocal/opentherm-supply-pilot";
+const OPT_IN: &str = "/etc/nestlocal/opentherm-supply-control";
 const READY: &str = "ot-supply.ready";
 const LOCK: &str = "ot-managed.inflight";
 const ARM: &str = "ot-managed.arm";
@@ -158,7 +153,7 @@ fn parse_limits(text: &str) -> Option<Limits> {
     let min = parts.next()?.parse().ok()?;
     let max = parts.next()?.parse().ok()?;
     if parts.next().is_some() { return None; }
-    Limits::pilot(min,max)
+    Limits::new(min,max)
 }
 fn read_limits(path: &Path) -> Option<Limits> {
     let meta = fs::symlink_metadata(path).ok()?;
@@ -214,14 +209,14 @@ struct Run {
 /// Explicit local opt-in only. The in-flight marker survives a nestlocal
 /// restart during the same boot. Uncertain outcomes require local review;
 /// no automated retry, reverse write or marker clearing.
-pub(crate) struct Pilot {
+pub(crate) struct SupplyControl {
     limits: Limits,
     settings: PathBuf,
     dir: PathBuf,
     seen: AtomicBool,
     run: Mutex<Run>,
 }
-impl Pilot {
+impl SupplyControl {
     pub(crate) fn load(settings: PathBuf) -> Option<Self> {
         let limits = read_limits(Path::new(OPT_IN))?;
         let dir = PathBuf::from(crate::settings_ui::DIR);
@@ -254,7 +249,7 @@ impl Pilot {
     fn available(&self, watch: &crate::opentherm::Watch) -> bool {
         let Some(t) = now() else { return false; };
         self.worker(t).is_some() && ![LOCK,ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n)))
-            && watch.pilot_idle(t as i64) && self.before(watch).is_some()
+            && watch.control_idle(t as i64) && self.before(watch).is_some()
     }
     pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool) {
         let available = self.available(watch);
@@ -264,8 +259,8 @@ impl Pilot {
     }
     pub(crate) fn submit(&self, arg: &str, watch: &crate::opentherm::Watch) -> Result<(),String> {
         let mut run = self.run.lock().unwrap();
-        let target = self.limits.parse_target(arg).ok_or("invalid pilot temperature")?;
-        if run.active.is_some() || !self.available(watch) { return Err("native pilot not ready or previous command unresolved".into()); }
+        let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
+        if run.active.is_some() || !self.available(watch) { return Err("native supply control not ready or previous command unresolved".into()); }
         let before = self.before(watch).ok_or("saved and observed supply differ")?;
         if before == target { return Ok(()); }
         let t = now().ok_or("invalid clock")?;
@@ -290,7 +285,7 @@ impl Pilot {
         }
         run.active = Some(Active { tx, started:Instant::now() });
         run.status = "awaiting_native";
-        crate::logf!("OpenTherm pilot: published {before} -> {target} C, token {token}");
+        crate::logf!("OpenTherm supply control: published {before} -> {target} C, token {token}");
         Ok(())
     }
     pub(crate) fn poll(&self) {
@@ -307,11 +302,11 @@ impl Pilot {
         if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
                 if let Err(e) = fs::remove_file(self.dir.join(LOCK)) {
-                    crate::logf!("OpenTherm pilot: cannot release command marker: {e}");
+                    crate::logf!("OpenTherm supply control: cannot release command marker: {e}");
                     run.status = "review_required";
                 }
             }
-            crate::logf!("OpenTherm pilot: final outcome {outcome:?}");
+            crate::logf!("OpenTherm supply control: final outcome {outcome:?}");
             run.active = None;
         }
     }
@@ -327,8 +322,8 @@ mod tests {
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
     #[test]
-    fn pilot_publication_never_overwrites_a_pending_record() {
-        let dir = std::env::temp_dir().join(format!("ot-pilot-{}-{:?}",std::process::id(),std::thread::current().id()));
+    fn control_publication_never_overwrites_a_pending_record() {
+        let dir = std::env::temp_dir().join(format!("ot-control-{}-{:?}",std::process::id(),std::thread::current().id()));
         fs::create_dir(&dir).unwrap();
         publish_once(&dir, ARM, b"first").unwrap();
         assert!(publish_once(&dir, ARM, b"second").is_err());
@@ -337,9 +332,10 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn pilot_opt_in_parser_has_no_default() {
-        assert_eq!(parse_limits("50 55"),Limits::pilot(50,55));
-        for invalid in ["","50","49 55","50 56","50 55 60","55 55","50.5 55"] {
+    fn explicit_control_limits_parser_has_no_default() {
+        assert_eq!(parse_limits("50 55"),Limits::new(50,55));
+        assert_eq!(parse_limits("50 60"),Limits::new(50,60));
+        for invalid in ["","50","0 60","60 50","50 101","50 55 60","55 55","50.5 55"] {
             assert_eq!(parse_limits(invalid),None);
         }
     }
@@ -362,19 +358,20 @@ mod tests {
     }
     #[test]
     fn managed_bounds_and_records() {
-        assert!(Limits::pilot(49,55).is_none());
-        assert!(Limits::pilot(50,56).is_none());
-        assert!(Limits::pilot(55,55).is_none());
-        assert!(Limits::pilot(50,55).is_some());
         assert!(Limits::new(0,55).is_none());
         assert!(Limits::new(55,50).is_none());
         assert!(Limits::new(50,101).is_none());
-        let l = Limits::new(50,55).unwrap();
-        for arg in ["NaN","inf","49","56","52.5",""] { assert_eq!(l.parse_target(arg), None); }
+        let l = Limits::new(50,60).unwrap();
+        for arg in ["NaN","inf","49","61","52.5",""] { assert_eq!(l.parse_target(arg), None); }
         assert_eq!(l.parse_target("50.0"), Some(50));
+        assert_eq!(l.parse_target("60"), Some(60));
         assert!(Transaction::new(GEN,77,1000,l,55,55).is_none());
         assert!(Transaction::new(GEN,0,1000,l,55,50).is_none());
         assert!(Transaction::new(GEN,77,u32::MAX,l,55,50).is_none());
+        let wide = Transaction::new(GEN,78,1000,l,55,60).unwrap();
+        let (wide_arm,wide_request) = wide.records();
+        assert_eq!(decode(&wide_arm),Some([ARM_MAGIC,42,78,1030,50*FIXED,60*FIXED]));
+        assert_eq!(decode(&wide_request),Some([REQ_MAGIC,42,78,1030,55*FIXED,60*FIXED]));
         let (a,r) = trial().records();
         assert_eq!(decode(&a),Some([ARM_MAGIC,42,77,1030,50*FIXED,55*FIXED]));
         assert_eq!(decode(&r),Some([REQ_MAGIC,42,77,1030,55*FIXED,50*FIXED]));
