@@ -696,6 +696,9 @@ pub fn set_up_owned(
             name
         }
     };
+    if let Some(limits) = options.opentherm_supply_limits {
+        crate::nestlocal::OpenThermSupplyLimits::new(limits.min, limits.max)?;
+    }
     if options.opentherm_supply_limits.is_some() && options.mqtt.is_none() {
         return device("managed OpenTherm supply control needs MQTT");
     }
