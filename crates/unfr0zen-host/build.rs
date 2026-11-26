@@ -48,6 +48,7 @@ const REQUIRED: [&str; 24] = [
     "nestlocal-armv7",
     "doom-armv7",
     "custom-screen.o",
+    "managed-custom-screen.o",
     "j49-rcs-screen.o",
     "radio/radio.bin",
     "radio/radio.identity",
@@ -497,7 +498,7 @@ fn theme(root: &Path, out: &Path) {
 }
 
 fn custom_screen(root: &Path, out: &Path) {
-    for name in ["custom-screen.o", "j49-rcs-screen.o"] {
+    for name in ["custom-screen.o", "managed-custom-screen.o", "j49-rcs-screen.o"] {
         let object = root.join("build").join(name);
         println!("cargo:rerun-if-changed={}", object.display());
         let data = fs::read(&object)
