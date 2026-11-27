@@ -417,7 +417,7 @@ impl SupplyControl {
 
     pub(crate) fn poll(&self) {
         let mut run = self.run.lock().unwrap();
-        let Some(active) = run.active.as_ref() else { return; };
+        let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
         let pid = active.tx.generation.pid;
