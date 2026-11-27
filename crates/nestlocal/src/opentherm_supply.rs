@@ -115,6 +115,20 @@ impl Transaction {
         }
         self.outcome
     }
+
+    // A confirmed setter/getter pair or a rejection after the actual
+    // getter ran is evidence of the current native value. A pre-dispatch
+    // rejection has two zero words and is deliberately not telemetry.
+    fn observed_readback(&self, ack: &[u8]) -> Option<u32> {
+        let [magic,pid,token,status,before,after] = decode(ack)?;
+        if (magic,pid,token) != (ACK_MAGIC,self.generation.pid,self.token) { return None; }
+        let valid = match self.outcome {
+            Outcome::Confirmed => status == 2 && before == self.before * FIXED && after == self.target * FIXED,
+            Outcome::Rejected => status == 0 && before == after && before != self.before * FIXED,
+            _ => false,
+        };
+        (valid && after % FIXED == 0 && (FIXED..=100*FIXED).contains(&after)).then_some(after / FIXED)
+    }
 }
 
 // Read-only mode 3 worker heartbeat (separate from an ACK). A live PID
@@ -183,7 +197,7 @@ fn generation(pid: u32) -> Option<(Generation, u32)> {
     let started = boot.checked_add(start_ticks / ticks as u64)?.try_into().ok()?;
     Some((Generation { pid, start_ticks }, started))
 }
-fn current_generation() -> Option<Generation> {
+pub(crate) fn current_generation() -> Option<Generation> {
     let pids = crate::pids("nlclient");
     if pids.len() != 1 { return None; }
     generation(pids[0].try_into().ok()?).map(|(g,_)| g)
@@ -531,17 +545,46 @@ impl SupplyControl {
             }
         }
         let Some(active) = run.active.as_mut() else { return; };
-        let ack = fs::read(self.dir.join(ACK)).ok();
-        let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
+        // Read the ACK and its timestamp from the same opened file (native
+        // publication uses rename). Do not timestamp a later log flush.
+        let ack = (|| {
+            let mut file = fs::File::open(self.dir.join(ACK)).ok()?;
+            let timestamp = file.metadata().ok()?.modified().ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|time| i64::try_from(time.as_secs()).ok());
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).ok()?;
+            Some((bytes,timestamp))
+        })();
+        let generation = current_generation();
+        let outcome = active.tx.observe(generation,active.started.elapsed(),ack.as_ref().map(|(bytes,_)| bytes.as_slice()));
         let pid = active.tx.generation.pid;
         let token = active.tx.token;
         let target = active.tx.target;
         let failure = self.native_stage_reason(pid, token, outcome);
+        let readback = ack.as_ref().and_then(|(bytes, timestamp)| {
+            let degrees = active.tx.observed_readback(bytes)?;
+            let timestamp = (*timestamp)?;
+            let (observed_generation, started) = generation.and_then(|g| self::generation(g.pid))?;
+            if observed_generation != active.tx.generation { return None; }
+            let now = i64::from(now()?);
+            if timestamp < i64::from(started) || timestamp < i64::from(active.tx.expires - TTL)
+                || timestamp > now { return None; }
+            Some((degrees,timestamp))
+        });
+        if let Some((degrees,timestamp)) = readback {
+            watch.record_native_supply(active.tx.generation,timestamp,degrees);
+            crate::logf!("OpenTherm supply control: correlated native readback token={token} actual={degrees} C");
+        }
         let terminal = matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain);
         let next_status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
-            Outcome::Rejected => failure.unwrap_or("rejected"),
+            Outcome::Rejected => failure.unwrap_or_else(|| match readback {
+                Some((degrees,_)) if degrees == target => "already_at_target",
+                Some(_) => "rejected_native_baseline_changed",
+                None => "rejected",
+            }),
             Outcome::Uncertain => failure.unwrap_or("review_required"),
         };
         run.status = next_status;
@@ -567,6 +610,30 @@ mod tests {
         encode([ACK_MAGIC, 42, 77, status, before * FIXED, after * FIXED])
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
+    #[test]
+    fn opentherm_only_correlated_terminal_getter_values_refresh_baseline() {
+        let mut tx = trial();
+        let confirmed = ack(2,55,50);
+        assert_eq!(tx.observed_readback(&confirmed),None);
+        assert_eq!(tx.observe(Some(GEN),secs(2),Some(&confirmed)),Outcome::Confirmed);
+        assert_eq!(tx.observed_readback(&confirmed),Some(50));
+        assert_eq!(tx.observed_readback(&ack(2,55,55)),None);
+        let mut wrong = confirmed;
+        wrong[8] ^= 1;
+        assert_eq!(tx.observed_readback(&wrong),None);
+
+        let mut tx = trial();
+        let actual = ack(0,50,50);
+        assert_eq!(tx.observe(Some(GEN),secs(2),Some(&actual)),Outcome::Rejected);
+        assert_eq!(tx.observed_readback(&actual),Some(50));
+        assert_eq!(tx.observed_readback(&ack(0,0,0)),None);
+        assert_eq!(tx.observed_readback(&ack(0,55,55)),None);
+        assert_eq!(tx.observed_readback(&ack(0,101,101)),None);
+        let mut tx = trial();
+        assert_eq!(tx.observe(Some(GEN),secs(2),Some(&ack(3,55,50))),Outcome::Uncertain);
+        assert_eq!(tx.observed_readback(&confirmed),None);
+    }
+
     #[test]
     fn temporary_stale_heartbeat_allows_command_but_not_native_publication() {
         assert!(command_available("ready", true, false));

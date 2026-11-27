@@ -90,9 +90,47 @@ fn empty_state() -> Fields {
         .map(|k| (k.into(), Value::Null)).collect()
 }
 
+// A transaction-correlated native getter observation, not an optimistic
+// command echo. Keep the generation and measurement time so a later
+// physical setting event or nlclient restart can supersede it.
+#[derive(Clone, Copy)]
+struct NativeSupply {
+    generation: crate::opentherm_supply::Generation,
+    timestamp: i64,
+    degrees: u32,
+}
+
+#[derive(Default)]
+struct View {
+    fields: Fields,
+    supply_event_at: Option<i64>,
+    native_supply: Option<NativeSupply>,
+}
+impl View {
+    fn shown(&self, generation: Option<crate::opentherm_supply::Generation>, now: i64) -> Fields {
+        let mut fields = self.fields.clone();
+        if let Some(native) = self.native_supply.filter(|n|
+            Some(n.generation) == generation && n.timestamp <= now
+            && self.supply_event_at.is_none_or(|event| event <= n.timestamp)) {
+            fields.insert("opentherm_max_supply_temperature".into(), num(native.degrees as f64));
+        }
+        fields
+    }
+
+    fn update(&mut self, next: Fields, event_at: Option<i64>, opentherm: bool) -> bool {
+        let changed = self.fields != next || self.supply_event_at != event_at;
+        self.fields = next;
+        self.supply_event_at = event_at;
+        if !opentherm || self.native_supply.is_some_and(|native| event_at.is_some_and(|event| event > native.timestamp)) {
+            self.native_supply = None;
+        }
+        changed
+    }
+}
+
 #[derive(Default)]
 pub struct Watch {
-    shown: Mutex<Fields>,
+    shown: Mutex<View>,
     registers: Mutex<Fields>,
     pilot_idle: Mutex<Option<i64>>,
     combined_seen: AtomicBool,
@@ -102,7 +140,11 @@ pub struct Watch {
 impl Watch {
     pub fn shown(&self) -> Fields {
         let mut fields = empty_state();
-        fields.extend(self.shown.lock().unwrap().clone());
+        {
+            let view = self.shown.lock().unwrap();
+            let generation = view.native_supply.and_then(|_| crate::opentherm_supply::current_generation());
+            fields.extend(view.shown(generation, chrono::Utc::now().timestamp()));
+        }
         fields.extend(self.register_fields());
         fields
     }
@@ -127,13 +169,17 @@ impl Watch {
         true
     }
 
-    fn update(&self, next: Fields) -> bool {
-        let mut shown = self.shown.lock().unwrap();
-        if *shown == next {
-            return false;
-        }
-        *shown = next;
-        true
+    pub(crate) fn record_native_supply(&self, generation: crate::opentherm_supply::Generation,
+                                       timestamp: i64, degrees: u32) {
+        let mut view = self.shown.lock().unwrap();
+        if !(1..=100).contains(&degrees) { return; }
+        if view.supply_event_at.is_some_and(|event| event > timestamp) { return; }
+        if view.native_supply.is_some_and(|old| old.generation == generation && old.timestamp > timestamp) { return; }
+        view.native_supply = Some(NativeSupply { generation, timestamp, degrees });
+    }
+
+    fn update(&self, next: Fields, event_at: Option<i64>, opentherm: bool) -> bool {
+        self.shown.lock().unwrap().update(next, event_at, opentherm)
     }
 }
 
@@ -378,7 +424,10 @@ pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl 
                     } else { None }
                 });
                 let limit = samples.supply_maximum(now, started, maximum(&config));
-                let updated = state.update(samples.shown(now, limit));
+                let event_at = samples.supply_setting.as_ref()
+                    .filter(|(t, _)| started.is_some_and(|start| *t >= start && *t <= now))
+                    .map(|(t, _)| *t);
+                let updated = state.update(samples.shown(now, limit), event_at, true);
                 if updated || combined_new || dhw_new { changed(); }
             } else {
                 reader = None;
@@ -386,7 +435,7 @@ pub fn watch(state: Arc<Watch>, path: PathBuf, settings: PathBuf, changed: impl 
                 *state.pilot_idle.lock().unwrap() = None;
                 let combined = state.combined_seen.swap(false, Ordering::Relaxed);
                 let dhw = state.dhw_seen.swap(false, Ordering::Relaxed);
-                if state.update(empty_state()) || combined || dhw { changed(); }
+                if state.update(empty_state(), None, false) || combined || dhw { changed(); }
             }
             std::thread::sleep(POLL);
         }
@@ -506,6 +555,36 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         assert!(!reader.current(&path));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opentherm_native_ack_beats_older_log_and_settings_until_newer_event() {
+        use crate::opentherm_supply::Generation;
+        let generation = Generation {pid:42, start_ticks:123};
+        let newer = Generation {start_ticks:124,..generation};
+        let mut view = View::default();
+        let value = |degrees: u32| std::iter::once(("opentherm_max_supply_temperature".into(), json!(degrees))).collect::<Fields>();
+        let shown = |v: &View, g, now| v.shown(g,now)["opentherm_max_supply_temperature"].clone();
+        view.update(value(65), Some(T), true);
+        view.native_supply = Some(NativeSupply {generation,timestamp:T+10,degrees:55});
+        assert_eq!(shown(&view,Some(generation),T+11),json!(55));
+        view.update(value(65), Some(T), true);
+        assert_eq!(shown(&view,Some(generation),T+60),json!(55));
+        view.update(value(65), None, true);
+        assert_eq!(shown(&view,Some(generation),T+60),json!(55));
+        assert_eq!(shown(&view,Some(newer),T+60),json!(65));
+        assert_eq!(shown(&view,None,T+60),json!(65));
+        assert_eq!(shown(&view,Some(generation),T+9),json!(65));
+        // A buffered setting event from the same second must not undo
+        // the correlated native readback.
+        view.update(value(65), Some(T+10), true);
+        assert_eq!(shown(&view,Some(generation),T+60),json!(55));
+        view.update(value(60), Some(T+61), true);
+        assert_eq!(shown(&view,Some(generation),T+62),json!(60));
+        assert!(view.native_supply.is_none());
+        view.native_supply = Some(NativeSupply {generation,timestamp:T+63,degrees:55});
+        view.update(empty_state(), None, false);
+        assert!(view.native_supply.is_none());
     }
 
     #[test]
