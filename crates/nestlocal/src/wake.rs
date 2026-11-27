@@ -460,12 +460,18 @@ impl SleepClient {
         if let Some(conn) = self.wake.as_ref().and_then(|w| w.conn()) {
             report(&self.bus, conn.remote).await;
         }
-        if crate::thread_sleep::blocked() || (self.zigbee && crate::zigbee::wakeup::pending()) {
+        if holding() || crate::thread_sleep::blocked() || (self.zigbee && crate::zigbee::wakeup::pending()) {
             return (ENTITY_PATH.into(), false);
         }
         let iface = self.iface.clone();
         let _ = tokio::task::spawn_blocking(move || crate::arp::check(&iface)).await;
-        (ENTITY_PATH.into(), true)
+        // MQTT work may have arrived while reporting or checking ARP.
+        // In particular a deferred OpenTherm command needs the native
+        // worker awake before it can safely publish its one-shot request.
+        (ENTITY_PATH.into(), !holding()
+            && !sleep_blocked(self.matter, self.ready.load(Ordering::SeqCst), crate::matter::sleep_blocked())
+            && !crate::thread_sleep::blocked()
+            && !(self.zigbee && (crate::zigbee::wakeup::pending() || crate::zigbee::updating())))
     }
 
     /// The unit woke (reason or seconds asleep): hold it a moment, then let

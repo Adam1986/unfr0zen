@@ -9,6 +9,9 @@ const REQ_MAGIC: u32 = 0x3143544f; // OTC1: reserved managed request
 const ACK_MAGIC: u32 = 0x314b544f; // OTK1: existing acknowledgement
 const TTL: u32 = 30;
 const ACK_WAIT: Duration = Duration::from_secs(35);
+// Only wait for readiness before any request is published. Never retry a
+// native command. The deadline also uses wall time, which includes suspend.
+const WAKE_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Limits { min: u32, max: u32 }
@@ -244,7 +247,49 @@ struct Ready {
     now: u32,
     before: u32,
 }
+struct Pending {
+    target: u32,
+    generation: Generation,
+    received_at: u32,
+    started: Instant,
+}
+
+enum PendingDecision {
+    Wait,
+    Publish(Ready),
+    Reject(&'static str),
+}
+
+fn wake_recoverable(reason: &str) -> bool {
+    reason == "native_worker_heartbeat_stale"
+}
+
+fn command_available(reason: &str, discovered: bool, busy: bool) -> bool {
+    !busy && (reason == "ready" || (discovered && wake_recoverable(reason)))
+}
+
+impl Pending {
+    fn decision(&self, generation: Option<Generation>, wall: Option<u32>, elapsed: Duration,
+                eligible: bool, readiness: Result<Ready, &'static str>) -> PendingDecision {
+        if !eligible { return PendingDecision::Reject("rejected_offline_before_dispatch"); }
+        if generation != Some(self.generation) {
+            return PendingDecision::Reject("rejected_native_generation_changed_before_dispatch");
+        }
+        if elapsed >= WAKE_WAIT || !wall.and_then(|t| t.checked_sub(self.received_at))
+            .is_some_and(|age| u64::from(age) < WAKE_WAIT.as_secs()) {
+            return PendingDecision::Reject("rejected_native_wake_timeout");
+        }
+        match readiness {
+            Ok(ready) if ready.generation == self.generation => PendingDecision::Publish(ready),
+            Ok(_) => PendingDecision::Reject("rejected_native_generation_changed_before_dispatch"),
+            Err(reason) if wake_recoverable(reason) => PendingDecision::Wait,
+            Err(reason) => PendingDecision::Reject(reason),
+        }
+    }
+}
+
 struct Run {
+    pending: Option<Pending>,
     active: Option<Active>,
     status: &'static str,
 }
@@ -305,13 +350,16 @@ impl SupplyControl {
         let m = fs::symlink_metadata(&dir).ok()?;
         if !m.is_dir() || m.uid() != 0 || m.mode() & 0o077 != 0 { return None; }
         Some(Self { limits, settings, dir, seen: AtomicBool::new(false),
-            run: Mutex::new(Run {active:None, status:"idle"}),
+            run: Mutex::new(Run {pending:None, active:None, status:"idle"}),
             last_ready_reason: Mutex::new(None) })
     }
     pub(crate) fn limits(&self) -> (u32,u32) { (self.limits.min,self.limits.max) }
     pub(crate) fn discovered(&self) -> bool { self.seen.load(Ordering::Relaxed) }
-    pub(crate) fn active(&self) -> bool { self.run.lock().unwrap().active.is_some() }
-    fn worker(&self, t: u32) -> Result<Generation, &'static str> {
+    pub(crate) fn active(&self) -> bool {
+        let run = self.run.lock().unwrap();
+        run.pending.is_some() || run.active.is_some()
+    }
+    fn worker(&self) -> Result<(Generation, u32), &'static str> {
         if exists(Path::new("/var/run/unfr0zen-screen.attempt")) {
             return Err("screen_initialisation_in_progress");
         }
@@ -326,12 +374,15 @@ impl SupplyControl {
         if current != g { return Err("nlclient_process_generation_mismatch"); }
         if word(3) != 4 { return Err("native_worker_mode_not_managed"); }
         if word(2) == 0 { return Err("native_worker_heartbeat_timestamp_invalid"); }
+        if word(2) < started { return Err("native_worker_heartbeat_predates_process"); }
+        // Sample wall time after reading the heartbeat: its writer can cross
+        // a second boundary between the old clock sample and the file read.
+        let t = now().ok_or("thermostat_clock_unavailable")?;
         let age = t.checked_sub(word(2)).ok_or("native_worker_heartbeat_in_future")?;
         if age > 6 { return Err("native_worker_heartbeat_stale"); }
-        if word(2) < started { return Err("native_worker_heartbeat_predates_process"); }
         if !managed_worker_ready(&bytes,g,t) { return Err("native_worker_not_ready"); }
         self.seen.store(true,Ordering::Relaxed);
-        Ok(g)
+        Ok((g, t))
     }
     // Native event readback is authoritative for the current setting. The
     // persisted settings.config value may lag a successful native setter.
@@ -348,17 +399,19 @@ impl SupplyControl {
         if exists(&self.dir.join(ARM)) || exists(&self.dir.join(REQUEST)) {
             return Err("previous_command_record_present");
         }
-        let t = now().ok_or("thermostat_clock_unavailable")?;
-        let generation = self.worker(t)?;
         let before = self.before(watch).ok_or("native_supply_readback_missing_or_outside_limits")?;
+        let (generation, t) = self.worker()?;
         Ok(Ready { generation, now: t, before })
     }
     pub(crate) fn snapshot(&self, watch: &crate::opentherm::Watch) -> (bool,&'static str,bool,&'static str) {
-        let readiness = self.readiness(watch);
-        let (ready, reason) = match readiness {
-            Ok(_) => (true, "ready"),
-            Err(reason) => (false, reason),
-        };
+        let run = self.run.lock().unwrap();
+        let reason = if run.active.is_some() { "command_in_progress" }
+            else if run.pending.is_some() { "waiting_for_native_wake" }
+            else { self.readiness(watch).err().unwrap_or("ready") };
+        // A previously discovered, valid but temporarily stale worker is
+        // allowed to receive a fresh command; actual publication still
+        // requires the original strict heartbeat check.
+        let ready = command_available(reason, self.discovered(), run.pending.is_some() || run.active.is_some());
         {
             let mut previous = self.last_ready_reason.lock().unwrap();
             if *previous != Some(reason) {
@@ -366,9 +419,7 @@ impl SupplyControl {
                 *previous = Some(reason);
             }
         }
-        let run = self.run.lock().unwrap();
         let status = status_with_lock(run.status, run.active.is_some(), exists(&self.dir.join(LOCK)));
-        let reason = if run.active.is_some() { "command_in_progress" } else { reason };
         (ready,status,self.discovered(),reason)
     }
     fn publication_failed(&self, run: &mut Run, error: String) -> Result<(),String> {
@@ -386,17 +437,45 @@ impl SupplyControl {
 
     pub(crate) fn submit(&self, arg: &str, watch: &crate::opentherm::Watch) -> Result<(),String> {
         let mut run = self.run.lock().unwrap();
-        let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
-        if run.active.is_some() { return Err("command_in_progress".into()); }
-        let ready = match self.readiness(watch) {
-            Ok(ready) => ready,
-            Err(reason) => {
-                crate::logf!("OpenTherm supply control: pre-dispatch rejection target={target} C reason={reason}; native request NOT published");
-                return Err(reason.to_owned());
+        if run.active.is_some() || run.pending.is_some() { return Err("command_in_progress".into()); }
+        let target = match self.limits.parse_target(arg) {
+            Some(target) => target,
+            None => {
+                run.status = "rejected_invalid_supply_temperature";
+                return Err("invalid supply temperature".into());
             }
         };
+        crate::logf!("OpenTherm supply control: received live command target={target} C");
+        match self.readiness(watch) {
+            Ok(ready) => self.publish(&mut run, target, ready),
+            Err(reason) if wake_recoverable(reason) && self.discovered() => {
+                let Some(generation) = current_generation() else {
+                    run.status = "nlclient_process_missing_or_ambiguous";
+                    return Err(run.status.into());
+                };
+                let Some(received_at) = now() else {
+                    run.status = "thermostat_clock_unavailable";
+                    return Err(run.status.into());
+                };
+                run.pending = Some(Pending {target, generation, received_at, started:Instant::now()});
+                run.status = "waiting_for_native_wake";
+                crate::logf!("OpenTherm supply control: waiting for fresh native heartbeat target={target} C; no request published");
+                Ok(())
+            }
+            Err(reason) => {
+                run.status = reason;
+                crate::logf!("OpenTherm supply control: pre-dispatch rejection target={target} C reason={reason}; native request NOT published");
+                Err(reason.to_owned())
+            }
+        }
+    }
+
+    fn publish(&self, run: &mut Run, target: u32, ready: Ready) -> Result<(), String> {
         let before = ready.before;
-        if before == target { return Ok(()); }
+        if before == target {
+            run.status = "already_at_target";
+            return Ok(());
+        }
         let t = ready.now;
         let g = ready.generation;
         let mut random = [0u8;4];
@@ -412,12 +491,12 @@ impl SupplyControl {
         let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&lock).map_err(|e| e.to_string())?;
         if let Err(error) = file.write_all(&request) {
             drop(file);
-            return self.publication_failed(&mut run, format!("cannot write in-flight marker: {error}"));
+            return self.publication_failed(run, format!("cannot write in-flight marker: {error}"));
         }
         drop(file);
         run.status = "publishing";
         if let Err(error) = publish_once(&self.dir,ARM,&arm).and_then(|_| publish_once(&self.dir,REQUEST,&request)) {
-            return self.publication_failed(&mut run, format!("native publication failed: {error}"));
+            return self.publication_failed(run, format!("native publication failed: {error}"));
         }
         run.active = Some(Active { tx, started:Instant::now() });
         run.status = "awaiting_native";
@@ -429,8 +508,28 @@ impl SupplyControl {
         stage_reason_for_record(&bytes, pid, token, outcome)
     }
 
-    pub(crate) fn poll(&self) {
+    pub(crate) fn poll(&self, watch: &crate::opentherm::Watch, eligible: impl FnOnce() -> bool) {
         let mut run = self.run.lock().unwrap();
+        if let Some(pending) = run.pending.take() {
+            let readiness = self.readiness(watch);
+            match pending.decision(current_generation(), now(), pending.started.elapsed(), eligible(), readiness) {
+                PendingDecision::Wait => run.pending = Some(pending),
+                PendingDecision::Publish(ready) => {
+                    // A command is published once only. Nothing is queued
+                    // behind it, and no further attempt follows any error.
+                    if let Err(error) = self.publish(&mut run, pending.target, ready) {
+                        crate::logf!("OpenTherm supply control: deferred publication failed: {error}");
+                        if run.status == "waiting_for_native_wake" {
+                            run.status = "rejected_deferred_publication_failed";
+                        }
+                    }
+                }
+                PendingDecision::Reject(reason) => {
+                    run.status = reason;
+                    crate::logf!("OpenTherm supply control: pre-dispatch rejection target={} C reason={reason}; native request NOT published", pending.target);
+                }
+            }
+        }
         let Some(active) = run.active.as_mut() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
@@ -468,6 +567,32 @@ mod tests {
         encode([ACK_MAGIC, 42, 77, status, before * FIXED, after * FIXED])
     }
     fn secs(n: u64) -> Duration { Duration::from_secs(n) }
+    #[test]
+    fn temporary_stale_heartbeat_allows_command_but_not_native_publication() {
+        assert!(command_available("ready", true, false));
+        assert!(command_available("native_worker_heartbeat_stale", true, false));
+        assert!(!command_available("native_worker_heartbeat_stale", false, false));
+        assert!(!command_available("native_worker_heartbeat_stale", true, true));
+        for reason in ["previous_command_requires_review", "native_worker_heartbeat_missing",
+            "native_worker_heartbeat_in_future", "native_worker_mode_not_managed",
+            "native_supply_readback_missing_or_outside_limits", "screen_initialisation_in_progress",
+            "installation_limits_missing_or_changed"] {
+            assert!(!command_available(reason, true, false), "{reason}");
+        }
+        let pending = Pending { target:55, generation:GEN, received_at:1000, started:Instant::now() };
+        let stale = || Err("native_worker_heartbeat_stale");
+        let fresh = || Ok(Ready {generation:GEN, now:1003, before:60});
+        assert!(matches!(pending.decision(Some(GEN),Some(1002),secs(2),true,stale()), PendingDecision::Wait));
+        assert!(matches!(pending.decision(Some(GEN),Some(1003),secs(3),true,fresh()), PendingDecision::Publish(Ready {before:60,..})));
+        // Suspend can advance wall time but not Instant. Expiry must win.
+        assert!(matches!(pending.decision(Some(GEN),Some(1010),secs(1),true,fresh()), PendingDecision::Reject("rejected_native_wake_timeout")));
+        assert!(matches!(pending.decision(Some(GEN),Some(1003),secs(10),true,fresh()), PendingDecision::Reject("rejected_native_wake_timeout")));
+        assert!(matches!(pending.decision(Some(GEN),Some(999),secs(1),true,fresh()), PendingDecision::Reject("rejected_native_wake_timeout")));
+        assert!(matches!(pending.decision(Some(Generation {start_ticks:124,..GEN}),Some(1003),secs(3),true,fresh()), PendingDecision::Reject("rejected_native_generation_changed_before_dispatch")));
+        assert!(matches!(pending.decision(Some(GEN),Some(1003),secs(3),false,fresh()), PendingDecision::Reject("rejected_offline_before_dispatch")));
+        assert!(matches!(pending.decision(Some(GEN),Some(1003),secs(3),true,Err("previous_command_requires_review")), PendingDecision::Reject("previous_command_requires_review")));
+    }
+
     #[test]
     fn baseline_uses_confirmed_native_readback_even_when_persistence_lags() {
         let limits = Limits::new(50, 65).unwrap();

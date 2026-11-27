@@ -299,7 +299,11 @@ impl Bridge {
                 loop {
                     let Some(b) = bridge.upgrade() else { break; };
                     let Some(control) = b.supply_control.get() else { break; };
-                    control.poll();
+                    control.poll(&b.opentherm, || {
+                        b.live.as_ref().is_some_and(|l| l.alive())
+                            && b.store.get(&format!("device.{}", b.serial))
+                                .is_some_and(|dev| b.opentherm_enabled(&dev.value))
+                    });
                     let current = control.snapshot(&b.opentherm);
                     if last != Some(current) {
                         last = Some(current);
@@ -680,7 +684,8 @@ impl Bridge {
             shown.extend(self.opentherm.shown());
             if let Some(control) = self.supply_control.get() {
                 let (ready,status,_,reason) = control.snapshot(&self.opentherm);
-                // Availability follows native-worker readiness, not burner activity.
+                // Availability permits a bounded pre-dispatch wait for a previously
+                // discovered worker to wake; publication still requires a fresh heartbeat.
                 shown.insert("opentherm_supply_write_ready".into(), ready.into());
                 shown.insert("opentherm_supply_write_status".into(), status.into());
                 shown.insert("opentherm_supply_write_ready_reason".into(), reason.into());
