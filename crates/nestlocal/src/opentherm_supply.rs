@@ -417,24 +417,29 @@ impl SupplyControl {
 
     pub(crate) fn poll(&self) {
         let mut run = self.run.lock().unwrap();
-        let Some(active) = run.active.as_mut() else { return; };
+        let Some(active) = run.active.as_ref() else { return; };
         let ack = fs::read(self.dir.join(ACK)).ok();
         let outcome = active.tx.observe(current_generation(),active.started.elapsed(),ack.as_deref());
-        let failure = self.native_stage_reason(active.tx.generation.pid, active.tx.token, outcome);
-        run.status = match outcome {
+        let pid = active.tx.generation.pid;
+        let token = active.tx.token;
+        let target = active.tx.target;
+        let failure = self.native_stage_reason(pid, token, outcome);
+        let terminal = matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain);
+        let next_status = match outcome {
             Outcome::AwaitingNative => "awaiting_native",
             Outcome::Confirmed => "confirmed",
             Outcome::Rejected => failure.unwrap_or("rejected"),
             Outcome::Uncertain => failure.unwrap_or("review_required"),
         };
-        if matches!(outcome,Outcome::Confirmed|Outcome::Rejected|Outcome::Uncertain) {
+        run.status = next_status;
+        if terminal {
             if outcome != Outcome::Uncertain && ![ARM,REQUEST].iter().any(|n| exists(&self.dir.join(n))) {
                 if let Err(e) = fs::remove_file(self.dir.join(LOCK)) {
                     crate::logf!("OpenTherm supply control: cannot release command marker: {e}");
                     run.status = "review_required";
                 }
             }
-            crate::logf!("OpenTherm supply control: final outcome {outcome:?} pid={} token={} target={} C stage_reason={}", active.tx.generation.pid, active.tx.token, active.tx.target, failure.unwrap_or("none"));
+            crate::logf!("OpenTherm supply control: final outcome {outcome:?} pid={pid} token={token} target={target} C stage_reason={}", failure.unwrap_or("none"));
             run.active = None;
         }
     }
