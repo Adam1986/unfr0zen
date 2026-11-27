@@ -257,6 +257,7 @@ pub(crate) struct SupplyControl {
     dir: PathBuf,
     seen: AtomicBool,
     run: Mutex<Run>,
+    last_ready_reason: Mutex<Option<&'static str>>,
 }
 fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
     match (outcome, stage) {
@@ -290,7 +291,8 @@ impl SupplyControl {
         let m = fs::symlink_metadata(&dir).ok()?;
         if !m.is_dir() || m.uid() != 0 || m.mode() & 0o077 != 0 { return None; }
         Some(Self { limits, settings, dir, seen: AtomicBool::new(false),
-            run: Mutex::new(Run {active:None, status:"idle"}) })
+            run: Mutex::new(Run {active:None, status:"idle"}),
+            last_ready_reason: Mutex::new(None) })
     }
     pub(crate) fn limits(&self) -> (u32,u32) { (self.limits.min,self.limits.max) }
     pub(crate) fn discovered(&self) -> bool { self.seen.load(Ordering::Relaxed) }
@@ -343,6 +345,13 @@ impl SupplyControl {
             Ok(_) => (true, "ready"),
             Err(reason) => (false, reason),
         };
+        {
+            let mut previous = self.last_ready_reason.lock().unwrap();
+            if *previous != Some(reason) {
+                crate::logf!("OpenTherm write readiness transition: {} -> {reason}", (*previous).unwrap_or("uninitialised"));
+                *previous = Some(reason);
+            }
+        }
         let run = self.run.lock().unwrap();
         let status = if run.active.is_none() && exists(&self.dir.join(LOCK)) { "review_required" } else { run.status };
         let reason = if run.active.is_some() { "command_in_progress" } else { reason };
@@ -365,7 +374,13 @@ impl SupplyControl {
         let mut run = self.run.lock().unwrap();
         let target = self.limits.parse_target(arg).ok_or("invalid supply temperature")?;
         if run.active.is_some() { return Err("command_in_progress".into()); }
-        let ready = self.readiness(watch).map_err(str::to_owned)?;
+        let ready = match self.readiness(watch) {
+            Ok(ready) => ready,
+            Err(reason) => {
+                crate::logf!("OpenTherm supply control: pre-dispatch rejection target={target} C reason={reason}; native request NOT published");
+                return Err(reason.to_owned());
+            }
+        };
         let before = ready.before;
         if before == target { return Ok(()); }
         let t = ready.now;
@@ -419,7 +434,7 @@ impl SupplyControl {
                     run.status = "review_required";
                 }
             }
-            crate::logf!("OpenTherm supply control: final outcome {outcome:?}");
+            crate::logf!("OpenTherm supply control: final outcome {outcome:?} pid={} token={} target={} C stage_reason={}", active.tx.generation.pid, active.tx.token, active.tx.target, failure.unwrap_or("none"));
             run.active = None;
         }
     }
