@@ -512,6 +512,9 @@ struct wake_handler {
     void *vtable;
     int (*handle)(struct wake_handler *, void *);
     void *globals;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    u32 token;
+#endif
 };
 static int light_display(struct wake_handler *handler, void *event) {
     (void)event;
@@ -520,12 +523,12 @@ static int light_display(struct wake_handler *handler, void *event) {
     return RESULT_LIGHT_DISPLAY;
 }
 enum {
-    QUEUE_SUBMITTED = 0,
+    QUEUE_ATTEMPTED = 0,
     QUEUE_NO_CLIENT = 1,
     QUEUE_NO_HANDLER = 2,
     QUEUE_NO_EVENT = 3,
 };
-static int queue_handler(void *globals, int (*handle)(struct wake_handler *, void *)) {
+static int queue_handler(void *globals, int (*handle)(struct wake_handler *, void *), u32 token) {
     void *client = stock_client(globals);
     if (!client)
         return QUEUE_NO_CLIENT;
@@ -541,6 +544,11 @@ static int queue_handler(void *globals, int (*handle)(struct wake_handler *, voi
     handler->vtable = &handler->handle;
     handler->handle = handle;
     handler->globals = globals;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    handler->token = token;
+#else
+    (void)token;
+#endif
     native_activity_ctor(event);
     native_activity_init(event, EVENT_ACTIVITY, 0);
     /* nlClient inherits nlEventQueue. Its main thread dispatches the handler
@@ -548,12 +556,12 @@ static int queue_handler(void *globals, int (*handle)(struct wake_handler *, voi
      *
      * Do not interpret Enqueue's return value: the imported C++ ABI symbol
      * does not encode its return type, and no verified success convention is
-     * available here. The correlated native ACK remains the only evidence
-     * that this callback actually ran. */
+     * available here. A correlated callback-entry record proves entry;
+     * only a matching native ACK can confirm the setter/readback. */
     (void)native_enqueue(client, event, handler);
-    return QUEUE_SUBMITTED;
+    return QUEUE_ATTEMPTED;
 }
-static void wake_display(void *globals) { (void)queue_handler(globals, light_display); }
+static void wake_display(void *globals) { (void)queue_handler(globals, light_display, 0); }
 /* Seconds a wake request (display.request, its expiry as a u32) stays
  * current. */
 #define WAKE_EXPIRY 10
@@ -919,16 +927,21 @@ static void ot_reject_unqueued(unsigned int failure) {
     (void)ot_write_pre_dispatch_rejection(&request, &arm, 10 + failure);
 }
 #endif
-static void ot_supply_claimed(void *globals) {
+static void ot_supply_claimed(void *globals, u32 token) {
     if (!globals) return;
     struct ot_request request;
     struct ot_arm arm;
     if (!ot_read_record(OT_COMMAND "taken", &request, sizeof(request))) return;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    /* A delayed callback must not consume a different transaction's arm. */
+    if (!token || request.token != token || request.pid != (u32)native_getpid() ||
+        request.magic != OT_MANAGED_REQ_MAGIC) return;
+#else
+    (void)token;
+#endif
     if (rename_setting(OT_COMMAND "arm", OT_COMMAND "arm.taken") ||
         !ot_read_record(OT_COMMAND "arm.taken", &arm, sizeof(arm))) return;
-#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
-    (void)ot_write_stage((u32)native_getpid(), request.token, 2);
-#else
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT != 4
     write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 2, 1);
 #endif
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
@@ -974,13 +987,18 @@ static void ot_supply_claimed(void *globals) {
 static int OT_EVENT_HANDLER(struct wake_handler *handler, void *event) {
     (void)event;
     void *globals = handler->globals;
+    u32 token = 0;
+#if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
+    token = handler->token;
+    /* Record entry before reading or claiming either transaction file. */
+    (void)ot_write_stage((u32)native_getpid(), token, 2);
+#endif
     native_delete(handler);
-    ot_supply_claimed(globals);
+    ot_supply_claimed(globals, token);
     return RESULT_HANDLED;
 }
 static void OT_POLL(void *globals) {
     if (!globals || rename_setting(OT_COMMAND "request", OT_COMMAND "taken")) return;
-    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 1, 1);
 #if UNFR0ZEN_OT_SUPPLY_EXPERIMENT == 4
     struct ot_request submitted;
     if (!ot_read_record(OT_COMMAND "taken", &submitted, sizeof(submitted)) ||
@@ -988,13 +1006,14 @@ static void OT_POLL(void *globals) {
         !submitted.token)
         return;
     (void)ot_write_stage((u32)native_getpid(), submitted.token, 1);
-    int queued = queue_handler(globals, OT_EVENT_HANDLER);
-    if (queued != QUEUE_SUBMITTED) {
+    int queued = queue_handler(globals, OT_EVENT_HANDLER, submitted.token);
+    if (queued != QUEUE_ATTEMPTED) {
         /* No callback was enqueued, so this command can be rejected safely. */
         ot_reject_unqueued((unsigned int)queued);
     }
 #else
-    (void)queue_handler(globals, OT_EVENT_HANDLER);
+    write_numbers(OT_COMMAND "stage", (u32)native_getpid(), 1, 1);
+    (void)queue_handler(globals, OT_EVENT_HANDLER, 0);
 #endif
 }
 #endif

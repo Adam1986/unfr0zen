@@ -9,6 +9,7 @@ on:
       - feature/opentherm-supply-temperature
       - feature/opentherm-supply-control
       - fix/opentherm-control-availability
+      - fix/opentherm-queue-failure-diagnostics
 
 permissions:
   contents: read
@@ -103,7 +104,7 @@ jobs:
           cargo test --locked -p nestlocal --bin nestlocal schedule
 
       - name: Validate managed supply-control command guards
-        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability"]'), github.ref_name)
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability","fix/opentherm-queue-failure-diagnostics"]'), github.ref_name)
         run: |
           sh platform/common/nlclient/tests/test-ot-handoff.sh
           cargo test --locked -p nestlocal --bin nestlocal supply_temperature_commands_fail_closed
@@ -136,7 +137,7 @@ jobs:
             > build/nestlocal-armv7.sha256
 
       - name: Package matching managed native object and build metadata
-        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability"]'), github.ref_name)
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability","fix/opentherm-queue-failure-diagnostics"]'), github.ref_name)
         run: |
           UNFR0ZEN_OT_SUPPLY_EXPERIMENT=4 sh platform/common/nlclient/build.sh build/native
           cp build/native/managed-custom-screen.o build/managed-custom-screen.o
@@ -151,7 +152,7 @@ jobs:
           # This artifact alone does not enable the opt-in control.
 
       - name: Upload matching managed control components
-        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability"]'), github.ref_name)
+        if: contains(fromJSON('["feature/opentherm-supply-temperature","feature/opentherm-supply-control","fix/opentherm-control-availability","fix/opentherm-queue-failure-diagnostics"]'), github.ref_name)
         uses: actions/upload-artifact@v4
         with:
           name: opentherm-managed-control-armv7

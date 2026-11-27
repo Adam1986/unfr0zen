@@ -275,13 +275,27 @@ fn stage_reason_for_code(outcome: Outcome, stage: u32) -> Option<&'static str> {
     }
 }
 
-fn stage_reason_for_record(text: &str, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
-    let mut fields = text.split_whitespace();
-    if fields.next()?.parse::<u32>().ok()? != pid { return None; }
-    if fields.next()?.parse::<u32>().ok()? != token { return None; }
-    let stage = fields.next()?.parse::<u32>().ok()?;
-    if fields.next().is_some() { return None; }
-    stage_reason_for_code(outcome, stage)
+// Mode 4 writes three little-endian uint32 words, not a text record.
+fn stage_reason_for_record(bytes: &[u8], pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
+    if bytes.len() != 12 { return None; }
+    let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+    if word(0) != pid || word(4) != token || token == 0 { return None; }
+    stage_reason_for_code(outcome, word(8))
+}
+
+// A retained lock blocks all subsequent writes, but does not erase the
+// diagnostic from this process. A restart without a known outcome remains
+// review_required.
+fn status_with_lock(status: &'static str, active: bool, locked: bool) -> &'static str {
+    if !active && locked && !matches!(status,
+        "native_callback_not_acknowledged" | "native_callback_started_no_ack" |
+        "native_validation_or_setter_no_ack" |
+        "native_callback_reached_ack_stage_but_confirmation_uncertain" |
+        "pre_dispatch_rejection_ack_write_failed") {
+        "review_required"
+    } else {
+        status
+    }
 }
 
 impl SupplyControl {
@@ -353,7 +367,7 @@ impl SupplyControl {
             }
         }
         let run = self.run.lock().unwrap();
-        let status = if run.active.is_none() && exists(&self.dir.join(LOCK)) { "review_required" } else { run.status };
+        let status = status_with_lock(run.status, run.active.is_some(), exists(&self.dir.join(LOCK)));
         let reason = if run.active.is_some() { "command_in_progress" } else { reason };
         (ready,status,self.discovered(),reason)
     }
@@ -411,8 +425,8 @@ impl SupplyControl {
         Ok(())
     }
     fn native_stage_reason(&self, pid: u32, token: u32, outcome: Outcome) -> Option<&'static str> {
-        let text = fs::read_to_string(self.dir.join("ot-managed.stage")).ok()?;
-        stage_reason_for_record(&text, pid, token, outcome)
+        let bytes = fs::read(self.dir.join("ot-managed.stage")).ok()?;
+        stage_reason_for_record(&bytes, pid, token, outcome)
     }
 
     pub(crate) fn poll(&self) {
@@ -598,11 +612,31 @@ mod tests {
             Some("native_callback_reached_ack_stage_but_confirmation_uncertain"));
         assert_eq!(stage_reason_for_code(Outcome::Confirmed,4), None);
         assert_eq!(stage_reason_for_code(Outcome::Rejected,4), None);
-        assert_eq!(stage_reason_for_record("42 77 11", 42, 77, Outcome::Rejected),
+        // Actual native wire layout, including zero bytes that the old text parser rejected.
+        let record = [42, 0, 0, 0, 77, 0, 0, 0, 11, 0, 0, 0];
+        assert_eq!(stage_reason_for_record(&record, 42, 77, Outcome::Rejected),
             Some("rejected_no_native_client"));
-        assert_eq!(stage_reason_for_record("42 78 11", 42, 77, Outcome::Rejected), None);
-        assert_eq!(stage_reason_for_record("42 77 11 trailing", 42, 77, Outcome::Rejected), None);
-        assert_eq!(stage_reason_for_record("42 11", 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record(&record, 42, 78, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record(&record, 43, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record(&record[..11], 42, 77, Outcome::Rejected), None);
+        assert_eq!(stage_reason_for_record(b"42 77 11", 42, 77, Outcome::Rejected), None);
+        let mut callback = record;
+        callback[8] = 2;
+        assert_eq!(stage_reason_for_record(&callback, 42, 77, Outcome::Uncertain),
+            Some("native_callback_started_no_ack"));
+        assert_eq!(stage_reason_for_record(&callback, 42, 77, Outcome::Confirmed), None);
+    }
+
+    #[test]
+    fn uncertain_stage_remains_visible_without_releasing_review_lock() {
+        for stage in [1, 2, 3, 4, 111, 112, 113, 120] {
+            let status = stage_reason_for_code(Outcome::Uncertain, stage).unwrap();
+            assert_eq!(status_with_lock(status, false, true), status);
+        }
+        assert_eq!(status_with_lock("idle", false, true), "review_required");
+        assert_eq!(status_with_lock("confirmed", false, true), "review_required");
+        assert_eq!(status_with_lock("awaiting_native", true, true), "awaiting_native");
+        assert_eq!(status_with_lock("confirmed", false, false), "confirmed");
     }
 
     #[test]
